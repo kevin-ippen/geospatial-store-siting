@@ -303,7 +303,7 @@ poi_ring1 = sites_ring1.join(
 
 poi_features_1 = poi_ring1.groupBy("site_id").agg(
     F.countDistinct(F.when(F.col("size_category") == "anchor", F.col("poi_id"))).alias("retail_anchor_count_1ring"),
-    F.countDistinct(F.when(F.col("category") == "office", F.col("poi_id"))).alias("office_poi_count_1ring"),
+    F.countDistinct(F.when(F.col("category") == "Office", F.col("poi_id"))).alias("office_poi_count_1ring"),
     F.sum(F.coalesce(F.col("foot_traffic_index"), F.lit(0.0))).alias("total_foot_traffic_1ring"),
 )
 
@@ -315,7 +315,7 @@ school_ring2 = sites_ring2.join(
 )
 
 school_features = school_ring2.groupBy("site_id").agg(
-    F.countDistinct(F.when(F.col("category") == "school", F.col("poi_id"))).alias("school_count_2ring"),
+    F.countDistinct(F.when(F.col("category") == "School", F.col("poi_id"))).alias("school_count_2ring"),
 )
 
 poi_features = poi_features_1.join(school_features, on="site_id", how="outer")
