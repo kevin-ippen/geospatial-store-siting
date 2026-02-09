@@ -1,0 +1,43 @@
+resources:
+  jobs:
+    phase1_demo_data:
+      name: "[${bundle.target}] QSR Siting - Demo Data Generation"
+      description: "Generates synthetic bronze-layer data for the demo metro. Skip if using your own data."
+      tags:
+        project: "geospatial-siting"
+        phase: "1"
+
+      tasks:
+        - task_key: seed_demo_data
+          notebook_task:
+            notebook_path: ../notebooks/01_seed_demo_data.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              demo_mode: ${var.demo_mode}
+              demo_metro: ${var.demo_metro}
+          environment_key: data_env
+
+        - task_key: quality_check
+          depends_on:
+            - task_key: seed_demo_data
+          notebook_task:
+            notebook_path: ../notebooks/00_quality_checks.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              table_name: "demographics"
+              min_rows: "1000"
+          environment_key: data_env
+
+      environments:
+        - environment_key: data_env
+          spec:
+            client: "1"
+            dependencies:
+              - h3>=3.7
+              - faker>=22.0
+              - python-dateutil>=2.8
+
+      max_concurrent_runs: 1
+      timeout_seconds: 3600

@@ -1,0 +1,29 @@
+[project]
+name = "geospatial-siting-accelerator"
+version = "1.0.0"
+description = "Geospatial site selection accelerator for QSR and retail using Databricks"
+requires-python = ">=3.11"
+dependencies = [
+    "databricks-sdk>=0.20",
+    "pyspark>=3.5",
+    "h3>=3.7",
+    "faker>=22.0",
+    "python-dateutil>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]

@@ -1,0 +1,20 @@
+resources:
+  apps:
+    qsr-siting-app:
+      name: "qsr-siting-app"
+      description: "QSR Site Selection Intelligence - interactive map and scoring tool"
+      source_code_path: ../app
+
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: serving-endpoint
+          serving_endpoint:
+            name: ${var.model_endpoint_name}
+            permission: CAN_QUERY
+
+      permissions:
+        - user_name: ${var.app_owner}
+          level: CAN_MANAGE

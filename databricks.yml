@@ -1,0 +1,32 @@
+bundle:
+  name: geospatial-siting-accelerator
+
+variables:
+  catalog:
+    description: "Unity Catalog name for all tables"
+    default: "qsr_siting"
+  warehouse_id:
+    description: "SQL Warehouse ID for the app and queries"
+  demo_mode:
+    description: "Generate synthetic demo data (true/false)"
+    default: "true"
+  demo_metro:
+    description: "Metro to generate demo data for (Chicago, Dallas, Phoenix, Atlanta, Denver)"
+    default: "Chicago"
+  model_endpoint_name:
+    description: "Model serving endpoint name"
+    default: "qsr-site-scoring"
+  google_maps_api_key:
+    description: "Google Maps API key for Street View (optional, leave empty to disable)"
+    default: ""
+  app_owner:
+    description: "User or group email with CAN_MANAGE on the app"
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    default: true
+  prod:
+    mode: production

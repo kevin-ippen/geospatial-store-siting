@@ -1,0 +1,296 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Quality Checks for Store Siting Data
+# MAGIC
+# MAGIC Validates data quality after each pipeline step.
+# MAGIC Pass `table_name` as a widget parameter to specify which table to check.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Setup
+
+# COMMAND ----------
+
+# MAGIC %run ./_config
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+# Get table to validate from widget
+dbutils.widgets.text("table_name", "demographics")
+dbutils.widgets.text("min_rows", "100")
+dbutils.widgets.text("schema_name", "bronze")
+
+table_name = dbutils.widgets.get("table_name")
+min_rows = int(dbutils.widgets.get("min_rows"))
+schema_name = dbutils.widgets.get("schema_name")
+
+# Resolve schema to fully-qualified path
+schema_map = {"bronze": BRONZE, "silver": SILVER, "gold": GOLD, "models": MODELS}
+schema_prefix = schema_map.get(schema_name, f"{CATALOG}.{schema_name}")
+full_table_name = f"{schema_prefix}.{table_name}"
+print(f"Validating: {full_table_name}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Quality Check Functions
+
+# COMMAND ----------
+
+def check_table_exists(table_name):
+    """Verify table exists."""
+    try:
+        spark.table(table_name)
+        return True, f"Table {table_name} exists"
+    except Exception as e:
+        return False, f"Table {table_name} does not exist: {e}"
+
+def check_row_count(table_name, min_rows):
+    """Verify minimum row count."""
+    df = spark.table(table_name)
+    count = df.count()
+    if count >= min_rows:
+        return True, f"Row count: {count:,} (minimum: {min_rows:,})"
+    else:
+        return False, f"Row count {count:,} is below minimum {min_rows:,}"
+
+def check_no_nulls_in_key_columns(table_name, key_columns):
+    """Verify no nulls in key columns."""
+    df = spark.table(table_name)
+    issues = []
+    for col in key_columns:
+        if col in df.columns:
+            null_count = df.filter(F.col(col).isNull()).count()
+            if null_count > 0:
+                issues.append(f"{col}: {null_count} nulls")
+    if issues:
+        return False, f"Null values found: {', '.join(issues)}"
+    return True, "No nulls in key columns"
+
+def check_unique_ids(table_name, id_column):
+    """Verify ID column has unique values."""
+    df = spark.table(table_name)
+    if id_column not in df.columns:
+        return True, f"ID column {id_column} not in table"
+    total = df.count()
+    distinct = df.select(id_column).distinct().count()
+    if total == distinct:
+        return True, f"All {total:,} IDs are unique"
+    else:
+        return False, f"Duplicate IDs: {total - distinct:,} duplicates"
+
+def check_valid_h3(table_name, h3_column):
+    """Verify H3 indexes are valid format."""
+    df = spark.table(table_name)
+    if h3_column not in df.columns:
+        return True, f"H3 column {h3_column} not in table"
+    # H3 indexes should be 15-character hex strings
+    invalid = df.filter(
+        (F.length(F.col(h3_column)) != 15) |
+        (~F.col(h3_column).rlike("^[0-9a-f]+$"))
+    ).count()
+    if invalid == 0:
+        return True, f"All H3 indexes are valid"
+    else:
+        return False, f"Invalid H3 indexes: {invalid:,}"
+
+def check_value_ranges(table_name, column, min_val, max_val):
+    """Verify values are within expected range."""
+    df = spark.table(table_name)
+    if column not in df.columns:
+        return True, f"Column {column} not in table"
+    out_of_range = df.filter(
+        (F.col(column) < min_val) | (F.col(column) > max_val)
+    ).count()
+    if out_of_range == 0:
+        return True, f"{column} values all within [{min_val}, {max_val}]"
+    else:
+        return False, f"{column}: {out_of_range:,} values out of range [{min_val}, {max_val}]"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Table-Specific Checks
+
+# COMMAND ----------
+
+# Define checks for each table
+TABLE_CHECKS = {
+    "demographics": {
+        "min_rows": 10000,
+        "key_columns": ["h3_index", "metro", "population"],
+        "id_column": "h3_index",
+        "h3_column": "h3_index",
+        "range_checks": [
+            ("population", 0, 50000),
+            ("median_income", 20000, 300000),
+            ("pct_18_to_34", 0, 1),
+        ]
+    },
+    "traffic": {
+        "min_rows": 10000,
+        "key_columns": ["h3_index", "avg_daily_traffic"],
+        "id_column": "h3_index",
+        "h3_column": "h3_index",
+        "range_checks": [
+            ("avg_daily_traffic", 0, 200000),
+            ("pedestrian_index", 0, 100),
+            ("transit_score", 0, 100),
+        ]
+    },
+    "competitors": {
+        "min_rows": 1000,
+        "key_columns": ["competitor_id", "brand", "latitude", "longitude"],
+        "id_column": "competitor_id",
+        "h3_column": "h3_res8",
+        "range_checks": [
+            ("latitude", 25, 50),
+            ("longitude", -130, -70),
+            ("estimated_annual_sales", 500000, 5000000),
+        ]
+    },
+    "poi": {
+        "min_rows": 4000,
+        "key_columns": ["poi_id", "category", "latitude", "longitude"],
+        "id_column": "poi_id",
+        "h3_column": "h3_res8",
+        "range_checks": [
+            ("foot_traffic_index", 0, 100),
+        ]
+    },
+    "locations": {
+        "min_rows": 4000,
+        "key_columns": ["location_id", "latitude", "longitude", "property_type"],
+        "id_column": "location_id",
+        "h3_column": "h3_res8",
+        "range_checks": [
+            ("square_feet", 500, 10000),
+            ("rent_per_sqft", 5, 100),
+        ]
+    },
+    "existing_stores": {
+        "min_rows": 300,
+        "key_columns": ["store_id", "annual_sales", "latitude", "longitude"],
+        "id_column": "store_id",
+        "h3_column": "h3_res8",
+        "range_checks": [
+            ("annual_sales", 800000, 5000000),
+            ("transactions_per_day", 200, 2000),
+            ("avg_ticket", 5, 25),
+        ]
+    },
+    # Phase 2: Gold layer tables
+    "location_features": {
+        "min_rows": 5000,
+        "key_columns": ["site_id", "h3_res8", "site_type"],
+        "id_column": "site_id",
+        "h3_column": "h3_res8",
+        "range_checks": [
+            ("population_1ring", 0, 500000),
+            ("median_income_1ring", 10000, 300000),
+            ("competitor_count_1ring", 0, 50),
+        ]
+    },
+    "scored_locations": {
+        "min_rows": 4000,
+        "key_columns": ["site_id", "predicted_annual_sales", "score_tier"],
+        "id_column": "site_id",
+        "h3_column": "h3_res8",
+        "range_checks": [
+            ("predicted_annual_sales", 500000, 5000000),
+            ("percentile_rank", 0, 1),
+        ]
+    },
+}
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Run Checks
+
+# COMMAND ----------
+
+results = []
+all_passed = True
+
+# Get table config
+config = TABLE_CHECKS.get(table_name, {
+    "min_rows": min_rows,
+    "key_columns": [],
+    "id_column": None,
+    "h3_column": None,
+    "range_checks": []
+})
+
+# Check 1: Table exists
+passed, msg = check_table_exists(full_table_name)
+results.append(("Table Exists", passed, msg))
+all_passed = all_passed and passed
+
+if passed:
+    # Check 2: Row count
+    passed, msg = check_row_count(full_table_name, config.get("min_rows", min_rows))
+    results.append(("Row Count", passed, msg))
+    all_passed = all_passed and passed
+
+    # Check 3: No nulls in key columns
+    if config.get("key_columns"):
+        passed, msg = check_no_nulls_in_key_columns(full_table_name, config["key_columns"])
+        results.append(("No Nulls", passed, msg))
+        all_passed = all_passed and passed
+
+    # Check 4: Unique IDs
+    if config.get("id_column"):
+        passed, msg = check_unique_ids(full_table_name, config["id_column"])
+        results.append(("Unique IDs", passed, msg))
+        all_passed = all_passed and passed
+
+    # Check 5: Valid H3
+    if config.get("h3_column"):
+        passed, msg = check_valid_h3(full_table_name, config["h3_column"])
+        results.append(("Valid H3", passed, msg))
+        all_passed = all_passed and passed
+
+    # Check 6: Value ranges
+    for col, min_val, max_val in config.get("range_checks", []):
+        passed, msg = check_value_ranges(full_table_name, col, min_val, max_val)
+        results.append((f"Range: {col}", passed, msg))
+        all_passed = all_passed and passed
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Results Summary
+
+# COMMAND ----------
+
+print(f"\n{'='*60}")
+print(f"Quality Check Results for {full_table_name}")
+print(f"{'='*60}\n")
+
+for check_name, passed, msg in results:
+    status = "✅ PASS" if passed else "❌ FAIL"
+    print(f"{status} | {check_name}: {msg}")
+
+print(f"\n{'='*60}")
+if all_passed:
+    print("✅ ALL CHECKS PASSED")
+else:
+    print("❌ SOME CHECKS FAILED")
+print(f"{'='*60}\n")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Fail Job if Checks Failed
+
+# COMMAND ----------
+
+if not all_passed:
+    failed_checks = [name for name, passed, _ in results if not passed]
+    raise Exception(f"Quality checks failed: {', '.join(failed_checks)}")
+
+print(f"Quality validation complete for {table_name}")

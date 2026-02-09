@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn>=0.27
+databricks-sdk>=0.20
+databricks-sql-connector>=3.0
+httpx>=0.27
+pandas>=2.0

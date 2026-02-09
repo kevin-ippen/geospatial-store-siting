@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QSR Site Selection Intelligence</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+    <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; }
+
+        .header { background: #161b22; border-bottom: 1px solid #30363d; padding: 10px 24px; display: flex; align-items: center; justify-content: space-between; }
+        .header h1 { font-size: 18px; font-weight: 600; }
+        .header .subtitle { color: #8b949e; font-size: 13px; }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
+
+        .btn { padding: 5px 12px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; font-size: 12px; cursor: pointer; transition: all 0.15s; }
+        .btn:hover { background: #30363d; border-color: #8b949e; }
+        .btn-active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+        .btn-green { background: #238636; border-color: #238636; color: #fff; }
+        .btn-green:hover { background: #2ea043; }
+
+        .layout { display: grid; grid-template-columns: 280px 1fr 360px; height: calc(100vh - 48px); }
+
+        /* Left Panel */
+        .panel-left { background: #161b22; border-right: 1px solid #30363d; padding: 14px; overflow-y: auto; }
+        .panel-left h3 { font-size: 11px; text-transform: uppercase; color: #8b949e; margin-bottom: 6px; letter-spacing: 0.5px; }
+        .filter-group { margin-bottom: 14px; }
+        .filter-group label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+        select, input[type=range] { width: 100%; padding: 5px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 12px; }
+        select:focus { border-color: #58a6ff; outline: none; }
+
+        .layer-toggle { font-size: 12px; display: flex; align-items: center; gap: 6px; margin-bottom: 5px; cursor: pointer; }
+        .layer-toggle input { accent-color: #58a6ff; }
+
+        /* Map */
+        #map { width: 100%; height: 100%; background: #0d1117; }
+
+        /* Right Panel */
+        .panel-right { background: #161b22; border-left: 1px solid #30363d; padding: 14px; overflow-y: auto; }
+        .panel-right h3 { font-size: 11px; text-transform: uppercase; color: #8b949e; margin-bottom: 6px; letter-spacing: 0.5px; }
+
+        /* Cards */
+        .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+        .card-title { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+        .stat-value { font-size: 26px; font-weight: 700; color: #58a6ff; }
+        .stat-label { font-size: 11px; color: #8b949e; }
+
+        /* Tier badges */
+        .tier { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; }
+        .tier-A { background: #238636; color: #fff; }
+        .tier-B { background: #1f6feb; color: #fff; }
+        .tier-C { background: #d29922; color: #000; }
+        .tier-D { background: #da3633; color: #fff; }
+
+        /* Metro summary table */
+        .metro-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        .metro-table th { text-align: left; padding: 4px 3px; color: #8b949e; border-bottom: 1px solid #30363d; }
+        .metro-table td { padding: 4px 3px; border-bottom: 1px solid #21262d; }
+
+        /* SHAP bars */
+        .shap-bar-container { margin-bottom: 5px; }
+        .shap-label { font-size: 10px; color: #8b949e; margin-bottom: 2px; }
+        .shap-bar { height: 14px; border-radius: 3px; display: flex; align-items: center; padding: 0 6px; font-size: 9px; font-weight: 600; }
+        .shap-positive { background: linear-gradient(90deg, #238636, #2ea043); }
+        .shap-negative { background: linear-gradient(90deg, #da3633, #f85149); }
+
+        /* Loading */
+        .loading { text-align: center; padding: 20px; color: #8b949e; font-size: 12px; }
+
+        /* Legend */
+        .legend { position: absolute; bottom: 20px; left: 20px; z-index: 1000; background: #161b22ee; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px; }
+        .legend-item { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-bottom: 3px; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+        /* Heatmap color scale legend */
+        .color-scale { position: absolute; bottom: 20px; right: 20px; z-index: 1000; background: #161b22ee; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px; display: none; }
+        .color-scale-bar { width: 120px; height: 12px; border-radius: 3px; background: linear-gradient(90deg, #0d419d, #1f6feb, #238636, #d29922, #da3633); }
+        .color-scale-labels { display: flex; justify-content: space-between; font-size: 9px; color: #8b949e; margin-top: 3px; }
+
+        /* Site list */
+        .site-list-item { padding: 6px 8px; border-bottom: 1px solid #21262d; cursor: pointer; font-size: 11px; }
+        .site-list-item:hover { background: #21262d; }
+        .site-list-item .site-sales { font-weight: 600; color: #58a6ff; }
+
+        /* Rich tooltip */
+        .rich-tooltip { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 11px; line-height: 1.4; min-width: 200px; }
+        .rich-tooltip .tt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; border-bottom: 1px solid #30363d; padding-bottom: 4px; }
+        .rich-tooltip .tt-sales { font-size: 16px; font-weight: 700; color: #58a6ff; margin: 2px 0; }
+        .rich-tooltip .tt-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin-top: 4px; }
+        .rich-tooltip .tt-metric-label { color: #8b949e; font-size: 10px; }
+        .rich-tooltip .tt-shap { margin-top: 4px; padding-top: 4px; border-top: 1px solid #30363d; }
+        .rich-tooltip .tt-shap-item { display: flex; justify-content: space-between; font-size: 10px; }
+
+        /* Comparison mode */
+        .compare-badge { position: absolute; top: -6px; right: -6px; background: #1f6feb; color: #fff; width: 16px; height: 16px; border-radius: 50%; font-size: 9px; display: flex; align-items: center; justify-content: center; z-index: 600; font-weight: 700; }
+        .compare-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+        .compare-table th { text-align: left; padding: 3px 4px; color: #8b949e; border-bottom: 1px solid #30363d; font-weight: 500; }
+        .compare-table td { padding: 3px 4px; border-bottom: 1px solid #21262d; }
+        .compare-table td:first-child { color: #8b949e; }
+        .compare-table .highlight { color: #238636; font-weight: 600; }
+
+        /* Confidence interval bar */
+        .ci-bar-track { height: 8px; background: #21262d; border-radius: 4px; position: relative; margin: 6px 0; }
+        .ci-bar-range { position: absolute; height: 100%; background: linear-gradient(90deg, #1f6feb44, #58a6ff88, #1f6feb44); border-radius: 4px; }
+        .ci-bar-point { position: absolute; height: 14px; width: 3px; background: #58a6ff; border-radius: 2px; top: -3px; }
+
+        /* What-if sliders */
+        .whatif-slider { margin-bottom: 10px; }
+        .whatif-slider label { font-size: 10px; color: #8b949e; display: flex; justify-content: space-between; margin-bottom: 2px; }
+        .whatif-slider input[type=range] { -webkit-appearance: none; height: 4px; background: #30363d; border: none; border-radius: 2px; padding: 0; }
+        .whatif-slider input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #58a6ff; cursor: pointer; }
+        .whatif-delta { font-size: 13px; font-weight: 600; margin-top: 6px; }
+        .whatif-delta.positive { color: #238636; }
+        .whatif-delta.negative { color: #da3633; }
+
+        /* Daypart chart */
+        .daypart-bars { display: flex; gap: 6px; align-items: flex-end; height: 80px; margin-top: 6px; }
+        .daypart-bar { flex: 1; border-radius: 4px 4px 0 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; transition: height 0.3s; }
+        .daypart-bar .bar-fill { width: 100%; border-radius: 4px 4px 0 0; transition: height 0.3s; }
+        .daypart-bar .bar-label { font-size: 9px; color: #8b949e; margin-top: 4px; text-align: center; }
+        .daypart-bar .bar-value { font-size: 10px; font-weight: 600; margin-bottom: 2px; }
+
+        /* Similar sites */
+        .similar-item { padding: 6px 0; border-bottom: 1px solid #21262d; cursor: pointer; font-size: 11px; }
+        .similar-item:hover { background: #21262d; margin: 0 -12px; padding: 6px 12px; }
+        .similar-match { color: #238636; font-weight: 600; }
+
+        /* Modal */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; align-items: center; justify-content: center; }
+        .modal-overlay.active { display: flex; }
+        .modal-content { background: #161b22; border: 1px solid #30363d; border-radius: 12px; width: 80vw; height: 80vh; position: relative; overflow: hidden; }
+        .modal-close { position: absolute; top: 10px; right: 14px; z-index: 2001; background: #21262d; border: 1px solid #30363d; color: #e6edf3; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+        .modal-close:hover { background: #da3633; border-color: #da3633; }
+
+        /* Cannibalization lines */
+        .cannib-section { margin-top: 8px; }
+        .cannib-item { display: flex; justify-content: space-between; font-size: 10px; padding: 3px 0; border-bottom: 1px solid #21262d; }
+        .cannib-impact { color: #da3633; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>QSR Site Selection Intelligence</h1>
+            <span class="subtitle">AI-Powered Location Analytics | 5 Markets</span>
+        </div>
+        <div class="header-actions">
+            <div id="status" class="subtitle" style="margin-right: 12px;">Loading...</div>
+            <button class="btn" id="btn-compare" onclick="toggleCompareMode()">Compare Sites</button>
+            <button class="btn" id="btn-export" onclick="exportPDF()">Export PDF</button>
+        </div>
+    </div>
+
+    <div class="layout">
+        <!-- Left Panel: Filters -->
+        <div class="panel-left">
+            <h3>Quick Presets</h3>
+            <div class="filter-group">
+                <select id="preset-filter">
+                    <option value="">Custom</option>
+                    <option value="all-a">Tier A All Markets</option>
+                    <!-- additional presets populated dynamically -->
+                </select>
+            </div>
+
+            <h3>Filters</h3>
+            <div class="filter-group">
+                <label>Market</label>
+                <select id="metro-filter">
+                    <option value="">All Markets</option>
+                    <!-- populated dynamically from data -->
+                </select>
+            </div>
+
+            <div class="filter-group">
+                <label>Score Tier</label>
+                <select id="tier-filter">
+                    <option value="">All Tiers</option>
+                    <option value="A">Tier A (Top 10%)</option>
+                    <option value="B">Tier B (10-30%)</option>
+                    <option value="C">Tier C (30-60%)</option>
+                    <option value="D">Tier D (Bottom 40%)</option>
+                </select>
+            </div>
+
+            <div class="filter-group">
+                <label>Layers</label>
+                <label class="layer-toggle"><input type="checkbox" id="show-candidates" checked> Candidate Sites</label>
+                <label class="layer-toggle"><input type="checkbox" id="show-existing" checked> Existing Stores</label>
+                <label class="layer-toggle"><input type="checkbox" id="show-competitors"> Competitors</label>
+                <label class="layer-toggle"><input type="checkbox" id="show-poi"> Points of Interest</label>
+            </div>
+
+            <div class="filter-group">
+                <label>Heat Map Overlay</label>
+                <select id="heatmap-select">
+                    <option value="">None</option>
+                    <option value="demand">Population Density</option>
+                    <option value="income">Income Level</option>
+                    <option value="traffic">Traffic Volume</option>
+                    <option value="competition">Competition Density</option>
+                </select>
+            </div>
+
+            <div class="filter-group" style="margin-top: 8px;">
+                <button class="btn" style="width: 100%;" onclick="resetFilters()">Reset Filters</button>
+            </div>
+
+            <h3 style="margin-top: 16px;">Market Summary</h3>
+            <div id="metro-summary" class="card">
+                <div class="loading">Loading...</div>
+            </div>
+
+            <h3 style="margin-top: 12px;">Top Sites</h3>
+            <div id="top-sites-list"></div>
+        </div>
+
+        <!-- Center: Map -->
+        <div style="position: relative;">
+            <div id="map"></div>
+            <div class="legend" id="legend">
+                <div class="legend-item"><div class="legend-dot" style="background:#238636"></div> Tier A (Premium)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#1f6feb"></div> Tier B (Strong)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#d29922"></div> Tier C (Average)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#da3633"></div> Tier D (Below)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#8b949e; border: 2px solid #e6edf3;"></div> Existing Store</div>
+            </div>
+            <div class="color-scale" id="color-scale">
+                <div style="font-size:10px;color:#8b949e;margin-bottom:4px;" id="color-scale-title">Overlay</div>
+                <div class="color-scale-bar"></div>
+                <div class="color-scale-labels"><span>Low</span><span>High</span></div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Site Detail / Comparison -->
+        <div class="panel-right" id="right-panel">
+            <!-- Comparison mode header (hidden by default) -->
+            <div id="compare-header" style="display:none;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <h3>Comparing Sites (<span id="compare-count">0</span>/4)</h3>
+                    <button class="btn" onclick="clearComparison()" style="font-size:10px;padding:2px 8px;">Clear</button>
+                </div>
+                <div id="compare-content" class="card"></div>
+            </div>
+
+            <!-- Normal site detail (shown by default) -->
+            <div id="detail-mode">
+                <h3>Site Detail</h3>
+                <div id="site-detail" class="card">
+                    <p style="color: #8b949e; font-size: 12px;">Click a site on the map to see details.</p>
+                </div>
+
+                <div id="confidence-panel" style="display:none;"></div>
+
+                <div id="shap-panel" style="display:none;">
+                    <h3 style="margin-top: 12px;">Score Drivers (SHAP)</h3>
+                    <div id="shap-bars" class="card"></div>
+                </div>
+
+                <div id="whatif-panel" style="display:none;">
+                    <h3 style="margin-top: 12px;">What-If Analysis</h3>
+                    <div id="whatif-content" class="card"></div>
+                </div>
+
+                <div id="cannib-panel" style="display:none;">
+                    <h3 style="margin-top: 12px;">Cannibalization Impact</h3>
+                    <div id="cannib-content" class="card"></div>
+                </div>
+
+                <div id="similar-panel" style="display:none;">
+                    <h3 style="margin-top: 12px;">Similar Existing Stores</h3>
+                    <div id="similar-content" class="card"></div>
+                </div>
+
+                <div id="daypart-panel" style="display:none;">
+                    <h3 style="margin-top: 12px;">Daypart Potential</h3>
+                    <div id="daypart-content" class="card"></div>
+                </div>
+
+                <div id="features-panel" style="display:none;">
+                    <h3 style="margin-top: 12px;">Location Features</h3>
+                    <div id="feature-table" class="card"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Street View Modal -->
+    <div class="modal-overlay" id="streetview-modal">
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeStreetView()">&times;</button>
+            <div id="streetview-container" style="width:100%;height:100%;"></div>
+        </div>
+    </div>
+
+    <script>
+    // ========================================================================
+    // STATE & CONFIG
+    // ========================================================================
+    let map, candidateLayer, existingLayer, competitorCluster, poiCluster, heatmapLayer, cannibLayer;
+    let allLocations = [];
+    let allStores = [];
+    let selectedSiteId = null;
+    let selectedSiteData = null;
+    let scoringFeatures = null;
+
+    // Comparison mode
+    let compareMode = false;
+    let comparedSites = [];  // [{site_id, data}]
+
+    // Cannibalization overlay markers
+    let cannibMarkers = [];
+
+    // Google Maps
+    let googleMapsKey = '';
+    let streetViewPanorama = null;
+
+    const TIER_COLORS = { A: '#238636', B: '#1f6feb', C: '#d29922', D: '#da3633' };
+    // Metro centers — populated dynamically from data
+    let METRO_CENTERS = { '': [39.0, -98.0] };
+
+    const BRAND_COLORS = {
+        "McDonald's": '#FFC300', "Burger King": '#D4380D', "Wendy's": '#CF1322',
+        "Taco Bell": '#722ED1', "Chick-fil-A": '#EB2F96', "Chipotle": '#52C41A',
+        "Five Guys": '#FA8C16',
+    };
+
+    // Static preset (the only one that's metro-agnostic)
+    const PRESETS = {
+        'all-a': { metro: '', tier: 'A', zoom: 5 },
+    };
+
+    const HEATMAP_COLORS = ['#0d419d','#1a5cb5','#1f6feb','#44a340','#238636','#8cc63f','#d29922','#e8912d','#da3633'];
+
+    // ========================================================================
+    // INIT MAP
+    // ========================================================================
+    function initMap() {
+        map = L.map('map', { zoomControl: true }).setView([39.0, -98.0], 5);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; CARTO', maxZoom: 19,
+        }).addTo(map);
+
+        candidateLayer = L.layerGroup().addTo(map);
+        existingLayer = L.layerGroup().addTo(map);
+        competitorCluster = L.markerClusterGroup({
+            maxClusterRadius: 40,
+            iconCreateFunction: function(cluster) {
+                const count = cluster.getChildCount();
+                return L.divIcon({
+                    html: `<div style="background:#d29922;color:#000;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;">${count}</div>`,
+                    className: '', iconSize: [24, 24],
+                });
+            },
+        });
+        poiCluster = L.markerClusterGroup({
+            maxClusterRadius: 50,
+            iconCreateFunction: function(cluster) {
+                return L.divIcon({
+                    html: `<div style="background:#30363d;color:#8b949e;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;">${cluster.getChildCount()}</div>`,
+                    className: '', iconSize: [20, 20],
+                });
+            },
+        });
+        heatmapLayer = L.layerGroup();
+        cannibLayer = L.layerGroup().addTo(map);
+    }
+
+    // ========================================================================
+    // DATA FETCHING
+    // ========================================================================
+    async function fetchJSON(url) {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+    }
+
+    async function loadLocations() {
+        const metro = document.getElementById('metro-filter').value;
+        const tier = document.getElementById('tier-filter').value;
+        let url = `/api/scored-locations?limit=2000`;
+        if (metro) url += `&metro=${metro}`;
+        if (tier) url += `&tier=${tier}`;
+        const data = await fetchJSON(url);
+        allLocations = data.locations;
+        renderCandidates();
+        renderTopSites();
+        document.getElementById('status').textContent = `${data.count} sites loaded`;
+    }
+
+    async function loadStores() {
+        const metro = document.getElementById('metro-filter').value;
+        let url = `/api/existing-stores`;
+        if (metro) url += `?metro=${metro}`;
+        const data = await fetchJSON(url);
+        allStores = data.stores;
+        renderExisting();
+    }
+
+    async function loadMetroSummary() {
+        const data = await fetchJSON('/api/metro-summary');
+        const container = document.getElementById('metro-summary');
+        if (!data.metros || data.metros.length === 0) {
+            container.innerHTML = '<p style="color:#8b949e;font-size:11px;">No data</p>';
+            return;
+        }
+        let html = '<table class="metro-table"><tr><th>Market</th><th>Sites</th><th>A</th><th>Avg $</th></tr>';
+        for (const m of data.metros) {
+            html += `<tr><td>${m.metro}</td><td>${m.total_candidates}</td><td><span class="tier tier-A">${m.tier_a}</span></td><td>$${(m.avg_predicted_sales/1e6).toFixed(1)}M</td></tr>`;
+        }
+        html += '</table>';
+        container.innerHTML = html;
+    }
+
+    async function loadCompetitors() {
+        const metro = document.getElementById('metro-filter').value;
+        let url = `/api/competitors`;
+        if (metro) url += `?metro=${metro}`;
+        const data = await fetchJSON(url);
+        competitorCluster.clearLayers();
+        for (const c of data.competitors) {
+            const color = BRAND_COLORS[c.brand] || '#8b949e';
+            const marker = L.circleMarker([c.latitude, c.longitude], {
+                radius: 4, fillColor: color, color: '#0d1117', weight: 1, fillOpacity: 0.9,
+            });
+            marker.bindTooltip(`<b>${c.brand}</b><br>${c.category}${c.drive_thru ? ' | Drive-Thru' : ''}`, { className: '', direction: 'top' });
+            competitorCluster.addLayer(marker);
+        }
+    }
+
+    async function loadPOI() {
+        const metro = document.getElementById('metro-filter').value;
+        let url = `/api/poi`;
+        if (metro) url += `?metro=${metro}`;
+        const data = await fetchJSON(url);
+        poiCluster.clearLayers();
+        const typeColors = { retail: '#58a6ff', office: '#8b949e', school: '#d29922', healthcare: '#da3633', entertainment: '#d926d9', grocery: '#238636' };
+        for (const p of data.poi) {
+            const color = typeColors[(p.poi_type || '').toLowerCase()] || '#8b949e';
+            const marker = L.circleMarker([p.latitude, p.longitude], {
+                radius: 3, fillColor: color, color: '#0d1117', weight: 1, fillOpacity: 0.7,
+            });
+            marker.bindTooltip(`<b>${p.name || p.poi_type}</b><br>${p.poi_type}`, { className: '', direction: 'top' });
+            poiCluster.addLayer(marker);
+        }
+    }
+
+    async function loadHeatmap(metric) {
+        heatmapLayer.clearLayers();
+        const metro = document.getElementById('metro-filter').value;
+        if (!metro) {
+            alert('Select a market first to enable heat map overlay.');
+            document.getElementById('heatmap-select').value = '';
+            document.getElementById('color-scale').style.display = 'none';
+            return;
+        }
+
+        const data = await fetchJSON(`/api/heatmap/${metric}?metro=${metro}`);
+        if (!data.cells || data.cells.length === 0) return;
+
+        const values = data.cells.map(c => c.value);
+        const minVal = Math.min(...values);
+        const maxVal = Math.max(...values);
+        const range = maxVal - minVal || 1;
+
+        for (const cell of data.cells) {
+            try {
+                const boundary = h3.cellToBoundary(cell.h3_index);
+                const latlngs = boundary.map(([lat, lng]) => [lat, lng]);
+                const norm = (cell.value - minVal) / range;
+                const color = getHeatColor(norm);
+                const poly = L.polygon(latlngs, {
+                    fillColor: color, fillOpacity: 0.45, color: color, weight: 0.5, opacity: 0.6,
+                });
+                poly.bindTooltip(`${metric}: ${fmt(cell.value)}`, { className: '', direction: 'top' });
+                heatmapLayer.addLayer(poly);
+            } catch(e) { /* skip invalid h3 cells */ }
+        }
+        map.addLayer(heatmapLayer);
+
+        // Show color scale
+        const titles = { demand: 'Population', income: 'Income', traffic: 'Traffic', competition: 'Competitors' };
+        document.getElementById('color-scale-title').textContent = titles[metric] || metric;
+        document.getElementById('color-scale').style.display = 'block';
+    }
+
+    function getHeatColor(norm) {
+        const stops = [
+            [0, 13, 65, 157],
+            [0.25, 31, 111, 235],
+            [0.5, 35, 134, 54],
+            [0.75, 210, 153, 34],
+            [1, 218, 54, 51],
+        ];
+        for (let i = 0; i < stops.length - 1; i++) {
+            if (norm >= stops[i][0] && norm <= stops[i+1][0]) {
+                const t = (norm - stops[i][0]) / (stops[i+1][0] - stops[i][0]);
+                const r = Math.round(stops[i][1] + t * (stops[i+1][1] - stops[i][1]));
+                const g = Math.round(stops[i][2] + t * (stops[i+1][2] - stops[i][2]));
+                const b = Math.round(stops[i][3] + t * (stops[i+1][3] - stops[i][3]));
+                return `rgb(${r},${g},${b})`;
+            }
+        }
+        return 'rgb(218,54,51)';
+    }
+
+    // ========================================================================
+    // RENDER MAP LAYERS
+    // ========================================================================
+    function renderCandidates() {
+        candidateLayer.clearLayers();
+        if (!document.getElementById('show-candidates').checked) return;
+
+        for (const loc of allLocations) {
+            const color = TIER_COLORS[loc.score_tier] || '#8b949e';
+            const isCompared = comparedSites.some(s => s.site_id === loc.site_id);
+            const marker = L.circleMarker([loc.latitude, loc.longitude], {
+                radius: loc.score_tier === 'A' ? 7 : 5,
+                fillColor: color,
+                color: isCompared ? '#fff' : '#0d1117',
+                weight: isCompared ? 3 : 1,
+                fillOpacity: 0.85,
+            });
+            marker.on('click', () => handleSiteClick(loc.site_id, loc.latitude, loc.longitude));
+
+            // Rich tooltip
+            let shapHtml = '';
+            if (loc.shap_top5) {
+                let shapData = loc.shap_top5;
+                if (typeof shapData === 'string') try { shapData = JSON.parse(shapData); } catch(e) {}
+                if (shapData && typeof shapData === 'object') {
+                    const entries = Object.entries(shapData).slice(0, 2);
+                    shapHtml = '<div class="tt-shap">' + entries.map(([f, v]) => {
+                        const sign = v >= 0 ? '+' : '';
+                        const cls = v >= 0 ? 'color:#238636' : 'color:#da3633';
+                        return `<div class="tt-shap-item"><span>${humanize(f)}</span><span style="${cls}">${sign}$${(v/1000).toFixed(0)}K</span></div>`;
+                    }).join('') + '</div>';
+                }
+            }
+
+            marker.bindTooltip(`
+                <div class="rich-tooltip">
+                    <div class="tt-header">
+                        <span style="font-weight:600;">${loc.site_id}</span>
+                        <span class="tier tier-${loc.score_tier}">Tier ${loc.score_tier}</span>
+                    </div>
+                    <div class="tt-sales">$${(loc.predicted_annual_sales/1e6).toFixed(2)}M</div>
+                    <div style="font-size:10px;color:#8b949e;">${loc.metro} | ${(loc.percentile_rank*100).toFixed(0)}th percentile</div>
+                    ${shapHtml}
+                </div>
+            `, { className: '', direction: 'top', sticky: false });
+            candidateLayer.addLayer(marker);
+        }
+    }
+
+    function renderExisting() {
+        existingLayer.clearLayers();
+        if (!document.getElementById('show-existing').checked) return;
+
+        for (const store of allStores) {
+            const marker = L.circleMarker([store.latitude, store.longitude], {
+                radius: 6, fillColor: '#8b949e', color: '#e6edf3', weight: 2, fillOpacity: 0.9,
+            });
+            marker.bindTooltip(`
+                <div class="rich-tooltip">
+                    <div class="tt-header">
+                        <span style="font-weight:600;">${store.store_name}</span>
+                    </div>
+                    <div class="tt-sales">$${(store.annual_sales/1e6).toFixed(2)}M</div>
+                    <div class="tt-metrics">
+                        <div><span class="tt-metric-label">Format</span><br>${store.format || '-'}</div>
+                        <div><span class="tt-metric-label">Quality</span><br>${store.location_quality_score ? store.location_quality_score.toFixed(1) : '-'}</div>
+                    </div>
+                </div>
+            `, { className: '', direction: 'top' });
+            existingLayer.addLayer(marker);
+        }
+    }
+
+    // ========================================================================
+    // CLICK HANDLING
+    // ========================================================================
+    function handleSiteClick(siteId, lat, lng) {
+        if (compareMode) {
+            addToComparison(siteId);
+        } else {
+            showSiteDetail(siteId);
+        }
+    }
+
+    // ========================================================================
+    // SITE DETAIL (single site view)
+    // ========================================================================
+    async function showSiteDetail(siteId) {
+        selectedSiteId = siteId;
+        const detail = await fetchJSON(`/api/site/${siteId}`);
+        selectedSiteData = detail;
+        const container = document.getElementById('site-detail');
+        const sales = detail.predicted_annual_sales;
+        const tier = detail.score_tier;
+        const pct = detail.percentile_rank;
+
+        container.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <div>
+                    <div style="font-size:10px;color:#8b949e;">${siteId}</div>
+                    <div style="font-size:12px;">${detail.metro}</div>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <span class="tier tier-${tier}">Tier ${tier}</span>
+                    <button class="btn" onclick="openStreetView(${detail.latitude}, ${detail.longitude})" style="font-size:10px;padding:2px 8px;" title="Street View">SV</button>
+                </div>
+            </div>
+            <div class="stat-value">$${(sales/1e6).toFixed(2)}M</div>
+            <div class="stat-label">Predicted Annual Sales (${(pct*100).toFixed(0)}th percentile)</div>
+            <hr style="border-color:#30363d;margin:10px 0;">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;">
+                <div><span style="color:#8b949e;">Pop (1mi)</span><br>${fmt(detail.population_1ring)}</div>
+                <div><span style="color:#8b949e;">Income</span><br>$${fmt(detail.median_income_1ring)}</div>
+                <div><span style="color:#8b949e;">Traffic</span><br>${fmt(detail.max_daily_traffic_1ring)}</div>
+                <div><span style="color:#8b949e;">Competitors</span><br>${detail.competitor_count_1ring} (1mi) / ${detail.competitor_count_3ring} (3mi)</div>
+            </div>
+        `;
+
+        // Show all detail panels, fetch data in parallel
+        document.getElementById('detail-mode').style.display = 'block';
+        document.getElementById('compare-header').style.display = 'none';
+
+        // SHAP bars
+        renderSHAP(detail);
+
+        // Load additional data in parallel
+        Promise.all([
+            loadConfidence(siteId),
+            loadCannibalization(siteId),
+            loadSimilarSites(siteId),
+            loadDaypart(siteId),
+            loadScoringFeatures(siteId),
+        ]);
+
+        // Feature list
+        renderFeatureTable(detail);
+    }
+
+    function renderSHAP(detail) {
+        let shapData = detail.shap_top5;
+        if (typeof shapData === 'string') try { shapData = JSON.parse(shapData); } catch(e) {}
+
+        if (shapData && Object.keys(shapData).length > 0) {
+            document.getElementById('shap-panel').style.display = 'block';
+            const shapContainer = document.getElementById('shap-bars');
+            let html = '';
+            const maxAbs = Math.max(...Object.values(shapData).map(Math.abs));
+
+            for (const [feat, val] of Object.entries(shapData)) {
+                const pct = Math.abs(val) / maxAbs * 100;
+                const cls = val >= 0 ? 'shap-positive' : 'shap-negative';
+                const sign = val >= 0 ? '+' : '';
+                html += `<div class="shap-bar-container"><div class="shap-label">${humanize(feat)}</div><div class="shap-bar ${cls}" style="width:${Math.max(pct, 8)}%;">${sign}$${(val/1000).toFixed(0)}K</div></div>`;
+            }
+            shapContainer.innerHTML = html;
+        }
+    }
+
+    function renderFeatureTable(detail) {
+        document.getElementById('features-panel').style.display = 'block';
+        const featContainer = document.getElementById('feature-table');
+        const featureKeys = [
+            'population_1ring', 'median_income_1ring', 'pct_target_demo_1ring',
+            'daytime_pop_1ring', 'max_daily_traffic_1ring', 'avg_transit_score_1ring',
+            'competitor_count_1ring', 'competitor_count_3ring', 'nearest_competitor_dist',
+            'competitive_intensity', 'retail_anchor_count_1ring', 'school_count_2ring',
+            'trade_area_quality', 'cannibalization_risk', 'market_saturation',
+        ];
+        let fhtml = '<table style="width:100%;font-size:10px;">';
+        for (const k of featureKeys) {
+            if (detail[k] !== undefined && detail[k] !== null) {
+                fhtml += `<tr><td style="color:#8b949e;padding:2px 0;">${humanize(k)}</td><td style="text-align:right;padding:2px 0;">${fmtVal(k, detail[k])}</td></tr>`;
+            }
+        }
+        fhtml += '</table>';
+        featContainer.innerHTML = fhtml;
+    }
+
+    // ========================================================================
+    // CONFIDENCE INTERVALS
+    // ========================================================================
+    async function loadConfidence(siteId) {
+        try {
+            const ci = await fetchJSON(`/api/confidence/${siteId}`);
+            if (!ci || ci.sample_size === 0) { document.getElementById('confidence-panel').style.display = 'none'; return; }
+
+            const pred = selectedSiteData?.predicted_annual_sales || ci.p50;
+            const lo = ci.p10, hi = ci.p90;
+            const range = hi - lo || 1;
+            const predPos = Math.min(100, Math.max(0, ((pred - lo) / range) * 100));
+
+            document.getElementById('confidence-panel').style.display = 'block';
+            document.getElementById('confidence-panel').innerHTML = `
+                <div class="card" style="margin-top:8px;">
+                    <div class="card-title">Confidence Range (n=${ci.sample_size})</div>
+                    <div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e;">
+                        <span>$${(lo/1e6).toFixed(2)}M</span>
+                        <span style="font-weight:600;color:#58a6ff;">$${(pred/1e6).toFixed(2)}M</span>
+                        <span>$${(hi/1e6).toFixed(2)}M</span>
+                    </div>
+                    <div class="ci-bar-track">
+                        <div class="ci-bar-range" style="left:0;width:100%;"></div>
+                        <div class="ci-bar-point" style="left:${predPos}%;"></div>
+                    </div>
+                    <div style="font-size:10px;color:#8b949e;text-align:center;">Similar stores earn $${(lo/1e6).toFixed(1)}M - $${(hi/1e6).toFixed(1)}M</div>
+                </div>
+            `;
+        } catch(e) { document.getElementById('confidence-panel').style.display = 'none'; }
+    }
+
+    // ========================================================================
+    // CANNIBALIZATION
+    // ========================================================================
+    async function loadCannibalization(siteId) {
+        try {
+            const data = await fetchJSON(`/api/cannibalization/${siteId}`);
+            cannibLayer.clearLayers();
+
+            if (!data.impacts || data.impacts.length === 0) {
+                document.getElementById('cannib-panel').style.display = 'none';
+                return;
+            }
+
+            document.getElementById('cannib-panel').style.display = 'block';
+            let html = `<div style="font-size:12px;font-weight:600;color:#da3633;margin-bottom:6px;">-$${(data.total_impacted_sales/1e6).toFixed(2)}M total impact</div>`;
+            html += `<div style="font-size:10px;color:#8b949e;margin-bottom:8px;">${data.stores_affected} stores within 3mi affected</div>`;
+
+            const site = selectedSiteData;
+            for (const impact of data.impacts) {
+                html += `<div class="cannib-item"><span>${impact.store_name} (${impact.distance_mi}mi)</span><span class="cannib-impact">-$${(impact.impacted_sales/1000).toFixed(0)}K (${impact.impact_pct}%)</span></div>`;
+
+                // Draw dashed line on map
+                if (site) {
+                    const line = L.polyline(
+                        [[site.latitude, site.longitude], [impact.latitude, impact.longitude]],
+                        { color: '#da3633', weight: 1.5, dashArray: '6 4', opacity: 0.7 }
+                    );
+                    const midLat = (site.latitude + impact.latitude) / 2;
+                    const midLng = (site.longitude + impact.longitude) / 2;
+                    line.bindTooltip(`-$${(impact.impacted_sales/1000).toFixed(0)}K`, { permanent: false, className: '', direction: 'center' });
+                    cannibLayer.addLayer(line);
+                }
+            }
+
+            // Draw impact radius circle
+            if (site) {
+                const circle = L.circle([site.latitude, site.longitude], {
+                    radius: 4828,  // 3 miles in meters
+                    fillColor: '#da3633', fillOpacity: 0.05, color: '#da3633', weight: 1, dashArray: '4 4',
+                });
+                cannibLayer.addLayer(circle);
+            }
+
+            document.getElementById('cannib-content').innerHTML = html;
+        } catch(e) { document.getElementById('cannib-panel').style.display = 'none'; }
+    }
+
+    // ========================================================================
+    // SIMILAR SITES
+    // ========================================================================
+    async function loadSimilarSites(siteId) {
+        try {
+            const data = await fetchJSON(`/api/similar-sites/${siteId}`);
+            if (!data.similar || data.similar.length === 0) {
+                document.getElementById('similar-panel').style.display = 'none';
+                return;
+            }
+
+            document.getElementById('similar-panel').style.display = 'block';
+            let html = '';
+            for (const s of data.similar) {
+                const traits = s.shared_traits.length > 0 ? s.shared_traits.join(', ') : 'general profile';
+                html += `<div class="similar-item" onclick="flyTo(${s.latitude}, ${s.longitude})">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <span style="font-weight:600;">${s.store_name}</span>
+                        <span class="similar-match">${s.similarity}%</span>
+                    </div>
+                    <div style="font-size:10px;color:#8b949e;">${s.metro} | $${(s.annual_sales/1e6).toFixed(2)}M | ${traits}</div>
+                </div>`;
+            }
+            document.getElementById('similar-content').innerHTML = html;
+        } catch(e) { document.getElementById('similar-panel').style.display = 'none'; }
+    }
+
+    // ========================================================================
+    // DAYPART DEMAND
+    // ========================================================================
+    async function loadDaypart(siteId) {
+        try {
+            const data = await fetchJSON(`/api/daypart/${siteId}`);
+            if (!data.breakfast && !data.lunch && !data.dinner) {
+                document.getElementById('daypart-panel').style.display = 'none';
+                return;
+            }
+
+            document.getElementById('daypart-panel').style.display = 'block';
+            const periods = [
+                { key: 'breakfast', label: 'Breakfast', color: '#d29922', icon: '6-10am' },
+                { key: 'lunch', label: 'Lunch', color: '#58a6ff', icon: '11-2pm' },
+                { key: 'dinner', label: 'Dinner', color: '#238636', icon: '5-9pm' },
+                { key: 'late_night', label: 'Late Night', color: '#722ED1', icon: '9pm-2am' },
+            ];
+            const maxScore = Math.max(...periods.map(p => data[p.key] || 0), 1);
+
+            let html = '<div class="daypart-bars">';
+            for (const p of periods) {
+                const val = data[p.key] || 0;
+                const heightPct = (val / maxScore) * 100;
+                const strength = val > 70 ? 'High' : val > 40 ? 'Med' : 'Low';
+                html += `<div class="daypart-bar" style="height:100%;">
+                    <div class="bar-value">${Math.round(val)}</div>
+                    <div class="bar-fill" style="height:${heightPct}%;background:${p.color};"></div>
+                    <div class="bar-label">${p.label}<br><span style="font-size:8px;">${p.icon}</span></div>
+                </div>`;
+            }
+            html += '</div>';
+
+            if (data.weekend_multiplier && data.weekend_multiplier > 1) {
+                html += `<div style="font-size:10px;color:#8b949e;margin-top:6px;text-align:center;">Weekend lift: +${((data.weekend_multiplier - 1) * 100).toFixed(0)}%</div>`;
+            }
+
+            document.getElementById('daypart-content').innerHTML = html;
+        } catch(e) { document.getElementById('daypart-panel').style.display = 'none'; }
+    }
+
+    // ========================================================================
+    // WHAT-IF SLIDERS
+    // ========================================================================
+    let whatIfDebounce = null;
+    let originalPrediction = 0;
+
+    async function loadScoringFeatures(siteId) {
+        try {
+            const data = await fetchJSON(`/api/site/${siteId}/scoring-features`);
+            scoringFeatures = data;
+            originalPrediction = selectedSiteData?.predicted_annual_sales || 0;
+            renderWhatIfPanel(data.features);
+        } catch(e) { document.getElementById('whatif-panel').style.display = 'none'; }
+    }
+
+    function renderWhatIfPanel(features) {
+        document.getElementById('whatif-panel').style.display = 'block';
+        const sliders = [
+            { key: 'population_1ring', label: 'Population (1mi)', min: 0, max: 100000, step: 1000 },
+            { key: 'median_income_1ring', label: 'Median Income', min: 20000, max: 200000, step: 5000, prefix: '$' },
+            { key: 'max_daily_traffic_1ring', label: 'Daily Traffic', min: 0, max: 100000, step: 1000 },
+            { key: 'competitor_count_1ring', label: 'Competitors (1mi)', min: 0, max: 20, step: 1 },
+            { key: 'rent_per_sqft', label: 'Rent $/sqft', min: 5, max: 80, step: 1, prefix: '$' },
+            { key: 'trade_area_quality', label: 'Trade Area Quality', min: 0, max: 100, step: 1 },
+        ];
+
+        let html = '<div id="whatif-result" class="whatif-delta" style="display:none;"></div>';
+        for (const s of sliders) {
+            const val = features[s.key] || 0;
+            const displayVal = s.prefix ? s.prefix + fmt(val) : fmt(val);
+            html += `<div class="whatif-slider">
+                <label><span>${s.label}</span><span id="whatif-val-${s.key}">${displayVal}</span></label>
+                <input type="range" id="whatif-${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${val}" oninput="onWhatIfChange('${s.key}', this.value, '${s.prefix || ''}')">
+            </div>`;
+        }
+        document.getElementById('whatif-content').innerHTML = html;
+    }
+
+    function onWhatIfChange(key, value, prefix) {
+        const label = document.getElementById(`whatif-val-${key}`);
+        label.textContent = prefix ? prefix + fmt(Number(value)) : fmt(Number(value));
+
+        clearTimeout(whatIfDebounce);
+        whatIfDebounce = setTimeout(async () => {
+            if (!scoringFeatures) return;
+            const features = { ...scoringFeatures.features };
+            // Collect all slider values
+            const sliderKeys = ['population_1ring', 'median_income_1ring', 'max_daily_traffic_1ring', 'competitor_count_1ring', 'rent_per_sqft', 'trade_area_quality'];
+            for (const k of sliderKeys) {
+                const el = document.getElementById(`whatif-${k}`);
+                if (el) features[k] = Number(el.value);
+            }
+
+            try {
+                const resp = await fetch('/api/score', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ features }),
+                });
+                const result = await resp.json();
+                if (result.predictions && result.predictions.length > 0) {
+                    const newPred = result.predictions[0].predicted_annual_sales || result.predictions[0];
+                    const delta = newPred - originalPrediction;
+                    const sign = delta >= 0 ? '+' : '';
+                    const cls = delta >= 0 ? 'positive' : 'negative';
+                    document.getElementById('whatif-result').style.display = 'block';
+                    document.getElementById('whatif-result').className = `whatif-delta ${cls}`;
+                    document.getElementById('whatif-result').innerHTML = `$${(newPred/1e6).toFixed(2)}M (${sign}$${(delta/1000).toFixed(0)}K)`;
+                }
+            } catch(e) { /* silent fail on what-if */ }
+        }, 500);
+    }
+
+    // ========================================================================
+    // COMPARISON MODE
+    // ========================================================================
+    function toggleCompareMode() {
+        compareMode = !compareMode;
+        const btn = document.getElementById('btn-compare');
+        btn.className = compareMode ? 'btn btn-active' : 'btn';
+        btn.textContent = compareMode ? 'Exit Compare' : 'Compare Sites';
+
+        if (compareMode) {
+            comparedSites = [];
+            document.getElementById('detail-mode').style.display = 'none';
+            document.getElementById('compare-header').style.display = 'block';
+            document.getElementById('compare-count').textContent = '0';
+            document.getElementById('compare-content').innerHTML = '<p style="color:#8b949e;font-size:11px;">Click up to 4 sites on the map to compare.</p>';
+        } else {
+            document.getElementById('detail-mode').style.display = 'block';
+            document.getElementById('compare-header').style.display = 'none';
+            comparedSites = [];
+            renderCandidates();
+        }
+    }
+
+    async function addToComparison(siteId) {
+        if (comparedSites.some(s => s.site_id === siteId)) return;
+        if (comparedSites.length >= 4) return;
+
+        const detail = await fetchJSON(`/api/site/${siteId}`);
+        comparedSites.push({ site_id: siteId, data: detail });
+        document.getElementById('compare-count').textContent = comparedSites.length;
+        renderCandidates();
+        renderComparisonTable();
+    }
+
+    function clearComparison() {
+        comparedSites = [];
+        document.getElementById('compare-count').textContent = '0';
+        document.getElementById('compare-content').innerHTML = '<p style="color:#8b949e;font-size:11px;">Click up to 4 sites on the map to compare.</p>';
+        renderCandidates();
+    }
+
+    function renderComparisonTable() {
+        if (comparedSites.length === 0) return;
+
+        const metrics = [
+            { key: 'predicted_annual_sales', label: 'Predicted Sales', fmt: v => '$' + (v/1e6).toFixed(2) + 'M' },
+            { key: 'score_tier', label: 'Tier', fmt: v => v },
+            { key: 'percentile_rank', label: 'Percentile', fmt: v => (v*100).toFixed(0) + 'th' },
+            { key: 'population_1ring', label: 'Population (1mi)', fmt: v => fmt(v) },
+            { key: 'median_income_1ring', label: 'Income', fmt: v => '$' + fmt(v) },
+            { key: 'max_daily_traffic_1ring', label: 'Traffic', fmt: v => fmt(v) },
+            { key: 'competitor_count_1ring', label: 'Competitors (1mi)', fmt: v => v },
+            { key: 'competitor_count_3ring', label: 'Competitors (3mi)', fmt: v => v },
+            { key: 'trade_area_quality', label: 'Trade Area Quality', fmt: v => Number(v).toFixed(1) },
+            { key: 'cannibalization_risk', label: 'Cannib. Risk', fmt: v => (v*100).toFixed(1) + '%' },
+        ];
+
+        let html = '<table class="compare-table"><tr><th></th>';
+        for (const site of comparedSites) {
+            html += `<th style="text-align:center;"><span class="tier tier-${site.data.score_tier}" style="margin-bottom:2px;">${site.data.score_tier}</span><br><span style="font-size:9px;">${site.site_id.slice(-6)}</span></th>`;
+        }
+        html += '</tr>';
+
+        for (const m of metrics) {
+            html += `<tr><td>${m.label}</td>`;
+            // Find best value for highlighting
+            const values = comparedSites.map(s => s.data[m.key]);
+            const best = m.key === 'competitor_count_1ring' || m.key === 'cannibalization_risk' ? Math.min(...values) : Math.max(...values);
+
+            for (const site of comparedSites) {
+                const val = site.data[m.key];
+                const isBest = comparedSites.length > 1 && val === best;
+                html += `<td style="text-align:center;" class="${isBest ? 'highlight' : ''}">${m.fmt(val)}</td>`;
+            }
+            html += '</tr>';
+        }
+        html += '</table>';
+
+        document.getElementById('compare-content').innerHTML = html;
+    }
+
+    // ========================================================================
+    // STREET VIEW
+    // ========================================================================
+    async function initGoogleMaps() {
+        try {
+            const config = await fetchJSON('/api/config/maps-key');
+            googleMapsKey = config.key;
+            if (googleMapsKey) {
+                const script = document.createElement('script');
+                script.src = `https://maps.googleapis.com/maps/api/js?key=${googleMapsKey}`;
+                document.head.appendChild(script);
+            }
+        } catch(e) { /* Google Maps not available */ }
+    }
+
+    function openStreetView(lat, lng) {
+        if (!googleMapsKey || typeof google === 'undefined') {
+            // Fallback: open Google Maps in new tab
+            window.open(`https://www.google.com/maps/@${lat},${lng},3a,75y,0h,90t/data=!3m6!1e1!3m4!1s!2e0!7i16384!8i8192`, '_blank');
+            return;
+        }
+        const modal = document.getElementById('streetview-modal');
+        modal.classList.add('active');
+        streetViewPanorama = new google.maps.StreetViewPanorama(
+            document.getElementById('streetview-container'),
+            { position: { lat, lng }, pov: { heading: 0, pitch: 0 }, zoom: 1 }
+        );
+    }
+
+    function closeStreetView() {
+        document.getElementById('streetview-modal').classList.remove('active');
+        if (streetViewPanorama) streetViewPanorama = null;
+    }
+
+    // ========================================================================
+    // PDF EXPORT
+    // ========================================================================
+    async function exportPDF() {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        let y = 20;
+
+        doc.setFontSize(18);
+        doc.setTextColor(31, 111, 235);
+        doc.text('QSR Site Selection Report', 20, y); y += 10;
+        doc.setFontSize(10);
+        doc.setTextColor(100);
+        doc.text(`Generated: ${new Date().toLocaleDateString()}`, 20, y); y += 15;
+
+        const sites = compareMode && comparedSites.length > 0
+            ? comparedSites.map(s => s.data)
+            : (selectedSiteData ? [selectedSiteData] : []);
+
+        if (sites.length === 0) {
+            alert('Select a site first to export a report.');
+            return;
+        }
+
+        for (const site of sites) {
+            if (y > 250) { doc.addPage(); y = 20; }
+
+            doc.setFontSize(14);
+            doc.setTextColor(30);
+            doc.text(`Site: ${site.site_id || 'Unknown'}`, 20, y); y += 8;
+
+            doc.setFontSize(10);
+            doc.setTextColor(60);
+            const rows = [
+                ['Metro', site.metro],
+                ['Predicted Annual Sales', `$${(site.predicted_annual_sales/1e6).toFixed(2)}M`],
+                ['Score Tier', site.score_tier],
+                ['Percentile Rank', `${(site.percentile_rank*100).toFixed(0)}th`],
+                ['Population (1mi)', fmt(site.population_1ring)],
+                ['Median Income', `$${fmt(site.median_income_1ring)}`],
+                ['Daily Traffic', fmt(site.max_daily_traffic_1ring)],
+                ['Competitors (1mi)', String(site.competitor_count_1ring)],
+                ['Competitors (3mi)', String(site.competitor_count_3ring)],
+                ['Trade Area Quality', Number(site.trade_area_quality).toFixed(1)],
+                ['Cannibalization Risk', `${(site.cannibalization_risk*100).toFixed(1)}%`],
+            ];
+
+            for (const [label, value] of rows) {
+                doc.text(`${label}: ${value}`, 30, y); y += 6;
+            }
+
+            // SHAP
+            let shapData = site.shap_top5;
+            if (typeof shapData === 'string') try { shapData = JSON.parse(shapData); } catch(e) {}
+            if (shapData && Object.keys(shapData).length > 0) {
+                y += 4;
+                doc.setFontSize(11);
+                doc.text('Top Score Drivers:', 30, y); y += 6;
+                doc.setFontSize(10);
+                for (const [feat, val] of Object.entries(shapData)) {
+                    const sign = val >= 0 ? '+' : '';
+                    doc.text(`${humanize(feat)}: ${sign}$${(val/1000).toFixed(0)}K`, 36, y); y += 5;
+                }
+            }
+
+            y += 10;
+        }
+
+        doc.save(`site_report_${new Date().toISOString().slice(0,10)}.pdf`);
+    }
+
+    // ========================================================================
+    // PRESETS & FILTERS
+    // ========================================================================
+    function applyPreset(presetId) {
+        const preset = PRESETS[presetId];
+        if (!preset) return;
+        document.getElementById('metro-filter').value = preset.metro;
+        document.getElementById('tier-filter').value = preset.tier;
+        const center = METRO_CENTERS[preset.metro] || METRO_CENTERS[''];
+        map.setView(center, preset.zoom, { animate: true });
+        Promise.all([loadLocations(), loadStores()]);
+    }
+
+    function resetFilters() {
+        document.getElementById('preset-filter').value = '';
+        document.getElementById('metro-filter').value = '';
+        document.getElementById('tier-filter').value = '';
+        document.getElementById('heatmap-select').value = '';
+        document.getElementById('show-candidates').checked = true;
+        document.getElementById('show-existing').checked = true;
+        document.getElementById('show-competitors').checked = false;
+        document.getElementById('show-poi').checked = false;
+        map.setView([39.0, -98.0], 5, { animate: true });
+        heatmapLayer.clearLayers();
+        map.removeLayer(heatmapLayer);
+        map.removeLayer(competitorCluster);
+        map.removeLayer(poiCluster);
+        document.getElementById('color-scale').style.display = 'none';
+        Promise.all([loadLocations(), loadStores()]);
+    }
+
+    // ========================================================================
+    // HELPERS
+    // ========================================================================
+    function fmt(n) {
+        if (n === null || n === undefined) return '-';
+        return Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+    function fmtVal(key, val) {
+        if (key.includes('income') || key.includes('sales')) return '$' + fmt(val);
+        if (key.includes('pct') || key.includes('saturation') || key.includes('risk')) return (val * 100).toFixed(1) + '%';
+        if (key.includes('dist')) return Number(val).toFixed(2) + ' mi';
+        return Number(val).toLocaleString(undefined, { maximumFractionDigits: 1 });
+    }
+    function humanize(s) {
+        return s.replace(/_/g, ' ').replace(/1ring/g, '(1mi)').replace(/2ring/g, '(2mi)').replace(/3ring/g, '(3mi)');
+    }
+    function flyTo(lat, lng) {
+        map.setView([lat, lng], 13, { animate: true });
+    }
+
+    // ========================================================================
+    // TOP SITES LIST
+    // ========================================================================
+    function renderTopSites() {
+        const list = document.getElementById('top-sites-list');
+        const top15 = allLocations.slice(0, 15);
+        list.innerHTML = top15.map(loc => `
+            <div class="site-list-item" onclick="handleSiteClick('${loc.site_id}', ${loc.latitude}, ${loc.longitude}); flyTo(${loc.latitude}, ${loc.longitude});">
+                <span class="tier tier-${loc.score_tier}" style="margin-right:6px;">Tier ${loc.score_tier}</span>
+                <span class="site-sales">$${(loc.predicted_annual_sales/1e6).toFixed(2)}M</span>
+                <span style="color:#8b949e;"> — ${loc.metro}</span>
+            </div>
+        `).join('');
+    }
+
+    // ========================================================================
+    // EVENT LISTENERS
+    // ========================================================================
+    document.getElementById('preset-filter').addEventListener('change', (e) => {
+        if (e.target.value) applyPreset(e.target.value);
+    });
+
+    document.getElementById('metro-filter').addEventListener('change', async () => {
+        document.getElementById('preset-filter').value = '';
+        const metro = document.getElementById('metro-filter').value;
+        const center = METRO_CENTERS[metro] || METRO_CENTERS[''];
+        map.setView(center, metro ? 10 : 5, { animate: true });
+        await Promise.all([loadLocations(), loadStores()]);
+        // Reload overlay layers if active
+        if (document.getElementById('show-competitors').checked) loadCompetitors();
+        if (document.getElementById('show-poi').checked) loadPOI();
+        const heatMetric = document.getElementById('heatmap-select').value;
+        if (heatMetric) loadHeatmap(heatMetric);
+    });
+
+    document.getElementById('tier-filter').addEventListener('change', () => {
+        document.getElementById('preset-filter').value = '';
+        loadLocations();
+    });
+
+    document.getElementById('show-candidates').addEventListener('change', renderCandidates);
+    document.getElementById('show-existing').addEventListener('change', renderExisting);
+
+    document.getElementById('show-competitors').addEventListener('change', (e) => {
+        if (e.target.checked) { loadCompetitors(); map.addLayer(competitorCluster); }
+        else { competitorCluster.clearLayers(); map.removeLayer(competitorCluster); }
+    });
+
+    document.getElementById('show-poi').addEventListener('change', (e) => {
+        if (e.target.checked) { loadPOI(); map.addLayer(poiCluster); }
+        else { poiCluster.clearLayers(); map.removeLayer(poiCluster); }
+    });
+
+    document.getElementById('heatmap-select').addEventListener('change', (e) => {
+        heatmapLayer.clearLayers();
+        map.removeLayer(heatmapLayer);
+        if (e.target.value) {
+            loadHeatmap(e.target.value);
+        } else {
+            document.getElementById('color-scale').style.display = 'none';
+        }
+    });
+
+    // Close modal on escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeStreetView();
+    });
+
+    // ========================================================================
+    // BOOTSTRAP — discover metros from data
+    // ========================================================================
+    async function bootstrap() {
+        const data = await fetchJSON('/api/metro-summary');
+        const select = document.getElementById('metro-filter');
+        const presetSelect = document.getElementById('preset-filter');
+        if (data.metros) {
+            for (const m of data.metros) {
+                const name = m.metro;
+                // Populate metro dropdown
+                const opt = document.createElement('option');
+                opt.value = name; opt.textContent = name;
+                select.appendChild(opt);
+                // Compute center from first load
+                if (m.avg_lat && m.avg_lon) {
+                    METRO_CENTERS[name] = [m.avg_lat, m.avg_lon];
+                }
+                // Add per-metro preset
+                const pkey = `${name.toLowerCase()}-a`;
+                PRESETS[pkey] = { metro: name, tier: 'A', zoom: 10 };
+                const popt = document.createElement('option');
+                popt.value = pkey; popt.textContent = `${name} Tier A`;
+                presetSelect.appendChild(popt);
+            }
+        }
+    }
+
+    // ========================================================================
+    // STARTUP
+    // ========================================================================
+    initMap();
+    initGoogleMaps();
+    bootstrap().then(() => Promise.all([loadLocations(), loadStores(), loadMetroSummary()]));
+    </script>
+</body>
+</html>

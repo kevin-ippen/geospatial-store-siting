@@ -1,0 +1,98 @@
+resources:
+  jobs:
+    phase2_ml_pipeline:
+      name: "[${bundle.target}] QSR Siting - ML Pipeline"
+      description: "Feature engineering, model training, endpoint deployment, and candidate scoring"
+      tags:
+        project: "geospatial-siting"
+        phase: "2"
+
+      tasks:
+        - task_key: validate_schema
+          notebook_task:
+            notebook_path: ../notebooks/00_validate_schema.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: ml_env
+
+        - task_key: feature_engineering
+          depends_on:
+            - task_key: validate_schema
+          notebook_task:
+            notebook_path: ../notebooks/10_feature_engineering.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: ml_env
+
+        - task_key: check_features
+          depends_on:
+            - task_key: feature_engineering
+          notebook_task:
+            notebook_path: ../notebooks/00_quality_checks.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              table_name: "location_features"
+              schema_name: "gold"
+              min_rows: "500"
+          environment_key: ml_env
+
+        - task_key: train_model
+          depends_on:
+            - task_key: check_features
+          notebook_task:
+            notebook_path: ../notebooks/11_train_model.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: ml_env
+
+        - task_key: deploy_endpoint
+          depends_on:
+            - task_key: train_model
+          notebook_task:
+            notebook_path: ../notebooks/12_deploy_endpoint.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              model_endpoint_name: ${var.model_endpoint_name}
+          environment_key: ml_env
+
+        - task_key: score_candidates
+          depends_on:
+            - task_key: train_model
+          notebook_task:
+            notebook_path: ../notebooks/13_score_candidates.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: ml_env
+
+        - task_key: summary
+          depends_on:
+            - task_key: deploy_endpoint
+            - task_key: score_candidates
+          notebook_task:
+            notebook_path: ../notebooks/14_phase2_summary.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: ml_env
+
+      environments:
+        - environment_key: ml_env
+          spec:
+            client: "1"
+            dependencies:
+              - h3>=3.7
+              - xgboost>=2.0
+              - shap>=0.43
+              - optuna>=3.5
+              - scikit-learn>=1.4
+              - mlflow[databricks]>=2.10
+              - matplotlib>=3.7
+
+      max_concurrent_runs: 1
+      timeout_seconds: 7200
