@@ -73,3 +73,81 @@ else:
     msg = "Schema validation failed. See warnings above."
     print(f"\n{msg}")
     dbutils.notebook.exit(msg)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Minimum Sample Size Guidance
+# MAGIC
+# MAGIC The ML pipeline needs sufficient data to train a meaningful model.
+# MAGIC This section checks whether your data meets minimum thresholds and
+# MAGIC provides guidance when it doesn't.
+
+# COMMAND ----------
+
+SAMPLE_SIZE_THRESHOLDS = {
+    f"{BRONZE}.existing_stores": {
+        "min_recommended": 300,
+        "min_viable": 100,
+        "guidance": (
+            "The site scoring model trains on existing store revenue as labels. "
+            "With fewer than 300 stores, the model may overfit to your specific portfolio. "
+            "With fewer than 100, XGBoost will not have enough signal to learn meaningful "
+            "feature-label relationships.\n"
+            "  - 100-300 stores: Model will work but expect high CV variance (R² ± 0.15+)\n"
+            "  - 300-500 stores: Good fit for single-market demos\n"
+            "  - 500+ stores: Production-grade training set\n"
+            "  - 1000+ stores: Can support metro-specific sub-models"
+        ),
+    },
+    f"{BRONZE}.demographics": {
+        "min_recommended": 2000,
+        "min_viable": 500,
+        "guidance": (
+            "Demographics drive population, income, and age features. Fewer than 2,000 "
+            "hexagons means sparse trade area features — k-ring aggregations may have "
+            "many zero-population rings.\n"
+            "  - 500-2000 hexagons: Adequate for single-metro analysis\n"
+            "  - 2000-10000 hexagons: Good for multi-metro comparison\n"
+            "  - 10000+ hexagons: Full metro coverage at H3 resolution 8"
+        ),
+    },
+    f"{BRONZE}.competitors": {
+        "min_recommended": 200,
+        "min_viable": 50,
+        "guidance": (
+            "Competitor locations drive cannibalization risk and competitive intensity "
+            "features. Fewer than 200 competitors means the Huff gravity model has sparse "
+            "supply points, leading to overestimated market share.\n"
+            "  - Source: SafeGraph, Foursquare, or web scraping of brand location pages"
+        ),
+    },
+}
+
+print(f"\n{'='*60}")
+print("Sample Size Assessment")
+print(f"{'='*60}\n")
+
+size_warnings = []
+for table_name, thresholds in SAMPLE_SIZE_THRESHOLDS.items():
+    try:
+        count = spark.table(table_name).count()
+        if count >= thresholds["min_recommended"]:
+            print(f"  ✓ {table_name}: {count:,} rows (recommended: {thresholds['min_recommended']:,}+)")
+        elif count >= thresholds["min_viable"]:
+            print(f"  ⚠ {table_name}: {count:,} rows (viable but below recommended {thresholds['min_recommended']:,})")
+            print(f"    {thresholds['guidance']}")
+            size_warnings.append(table_name)
+        else:
+            print(f"  ✗ {table_name}: {count:,} rows (below minimum viable {thresholds['min_viable']:,})")
+            print(f"    {thresholds['guidance']}")
+            size_warnings.append(table_name)
+    except Exception:
+        pass  # table doesn't exist — already caught in schema validation
+
+if size_warnings:
+    print(f"\n  ⚠ {len(size_warnings)} table(s) below recommended size — model quality may be limited")
+else:
+    print(f"\n  ✓ All tables meet recommended sample sizes")
+
+print(f"{'='*60}\n")

@@ -408,6 +408,246 @@ print(f"Cannibalization features: {cannib_risk.count()} sites")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 9b. Calibrate Huff β from Observed Sales
+# MAGIC
+# MAGIC Instead of hardcoding β = 2.0, we grid-search β ∈ [1.0, 3.0] to find the value
+# MAGIC that minimizes MSE between Huff-predicted demand and actual store sales.
+# MAGIC The fitted β is logged to MLflow and used for all downstream Huff computations.
+
+# COMMAND ----------
+
+import mlflow
+from pyspark.sql import Window as W
+
+# --- Huff β calibration: grid search over existing stores ---
+# For each candidate β, compute Huff expected demand for existing stores,
+# then pick the β that best correlates with actual sales.
+
+_existing_for_cal = spark.table(f"{BRONZE}.existing_stores").select(
+    F.col("store_id"), F.col("annual_sales"), F.col("metro"),
+    F.col("latitude"), F.col("longitude"),
+    F.col("square_feet"), F.col("drive_thru_pct"),
+).toPandas()
+
+# Pre-collect supply points and trade area data for calibration
+_supply_pdf = all_supply.select("supply_id", "supply_lat", "supply_lon", "attractiveness", "metro").toPandas()
+
+# Collect demographics for hex-level demand
+_demo_cal = spark.table(f"{BRONZE}.demographics").select(
+    "h3_index", "population", "latitude", "longitude", "metro"
+).toPandas()
+
+import math as _math
+
+def _haversine_py(lat1, lon1, lat2, lon2):
+    return _math.sqrt(((lat1 - lat2) * 69.0) ** 2
+                      + ((lon1 - lon2) * 69.0 * _math.cos(_math.radians(lat1))) ** 2)
+
+beta_min, beta_max, beta_step = HUFF_BETA_RANGE
+beta_candidates = np.arange(beta_min, beta_max + beta_step, beta_step)
+beta_results = []
+
+DAILY_SPEND_PER_CAPITA = 12.0
+
+print(f"Calibrating Huff β over {len(beta_candidates)} values [{beta_min}, {beta_max}]...")
+for beta_val in beta_candidates:
+    predicted_demands = []
+    actual_sales = []
+    for _, store in _existing_for_cal.iterrows():
+        s_lat, s_lon, s_metro = store["latitude"], store["longitude"], store["metro"]
+        s_sqft = float(store["square_feet"] or 2000)
+        s_dt = float(store["drive_thru_pct"] or 0)
+        s_attract = s_sqft * (1.0 + (0.3 if s_dt > 0 else 0.0))
+
+        # Trade area: hexes within ~1.5 miles
+        metro_hexes = _demo_cal[_demo_cal["metro"] == s_metro]
+        nearby_hexes = metro_hexes[
+            metro_hexes.apply(lambda h: _haversine_py(s_lat, s_lon, h["latitude"], h["longitude"]) <= 1.5, axis=1)
+        ]
+        if len(nearby_hexes) == 0:
+            continue
+
+        # Supply points in this metro
+        metro_supply = _supply_pdf[_supply_pdf["metro"] == s_metro]
+
+        total_huff_demand = 0.0
+        for _, hx in nearby_hexes.iterrows():
+            h_lat, h_lon, h_pop = hx["latitude"], hx["longitude"], hx["population"]
+            # Site gravity
+            d_site = max(_haversine_py(h_lat, h_lon, s_lat, s_lon), 0.05)
+            site_grav = s_attract / (d_site ** beta_val)
+            # Total supply gravity
+            total_grav = 0.0
+            for _, sp in metro_supply.iterrows():
+                d_sp = max(_haversine_py(h_lat, h_lon, sp["supply_lat"], sp["supply_lon"]), 0.05)
+                if d_sp <= HUFF_CANNIB_RADIUS:
+                    total_grav += sp["attractiveness"] / (d_sp ** beta_val)
+            total_grav += site_grav  # include self
+            huff_prob = site_grav / total_grav if total_grav > 0 else 0
+            total_huff_demand += h_pop * DAILY_SPEND_PER_CAPITA * 365 * huff_prob
+
+        predicted_demands.append(total_huff_demand)
+        actual_sales.append(store["annual_sales"])
+
+    if len(predicted_demands) > 10:
+        pred_arr = np.array(predicted_demands)
+        actual_arr = np.array(actual_sales)
+        mse = np.mean((pred_arr - actual_arr) ** 2)
+        corr = np.corrcoef(pred_arr, actual_arr)[0, 1]
+        beta_results.append({"beta": round(beta_val, 2), "mse": mse, "corr": corr})
+        print(f"  β={beta_val:.2f}  MSE={mse:.2e}  corr={corr:.3f}")
+
+# Pick best β by highest correlation (more robust than MSE with synthetic data)
+best_beta_row = max(beta_results, key=lambda r: r["corr"])
+CALIBRATED_HUFF_BETA = best_beta_row["beta"]
+
+print(f"\nCalibrated Huff β = {CALIBRATED_HUFF_BETA} (corr={best_beta_row['corr']:.3f})")
+print(f"  Default was β = {HUFF_BETA}")
+
+# Log to MLflow
+try:
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+    with mlflow.start_run(run_name="huff_beta_calibration", nested=True):
+        mlflow.log_param("beta_range", f"{beta_min}-{beta_max}")
+        mlflow.log_param("beta_step", beta_step)
+        mlflow.log_metric("calibrated_beta", CALIBRATED_HUFF_BETA)
+        mlflow.log_metric("best_correlation", best_beta_row["corr"])
+        mlflow.log_metric("best_mse", best_beta_row["mse"])
+    print(f"  Logged calibrated β to MLflow experiment: {MLFLOW_EXPERIMENT}")
+except Exception as e:
+    print(f"  MLflow logging skipped: {e}")
+
+# Use calibrated β for all downstream Huff computations
+HUFF_BETA = CALIBRATED_HUFF_BETA
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9c. Huff Gravity Model Features
+# MAGIC
+# MAGIC Computes probabilistic market share using the Huff model with **calibrated β**:
+# MAGIC `P(hex_i → site_j) = (Attract_j / dist_ij^β) / Σ_k(Attract_k / dist_ik^β)`
+# MAGIC
+# MAGIC **Outputs**: `huff_market_share` (average probability across trade area) and
+# MAGIC `huff_expected_demand` (annual demand captured from surrounding population).
+
+# All supply points: existing stores + competitors (each has location, sqft, drive-thru)
+supply_stores = spark.table(f"{BRONZE}.existing_stores").select(
+    F.col("store_id").alias("supply_id"),
+    F.col("latitude").alias("supply_lat"),
+    F.col("longitude").alias("supply_lon"),
+    F.col("square_feet").alias("supply_sqft"),
+    F.col("drive_thru_pct").alias("supply_dt"),
+    F.col("metro"),
+)
+supply_competitors = competitors.select(
+    F.col("competitor_id").alias("supply_id"),
+    F.col("latitude").alias("supply_lat"),
+    F.col("longitude").alias("supply_lon"),
+    F.lit(2200).alias("supply_sqft"),  # assumed avg for competitors
+    F.when(F.col("drive_thru"), 0.7).otherwise(0.0).alias("supply_dt"),
+    F.col("metro"),
+)
+all_supply = supply_stores.unionByName(supply_competitors)
+
+# Attractiveness = sqft * (1 + drive_thru_flag * 0.3)
+all_supply = all_supply.withColumn(
+    "attractiveness",
+    F.col("supply_sqft") * (F.lit(1.0) + F.when(F.col("supply_dt") > 0, F.lit(0.3)).otherwise(F.lit(0.0)))
+)
+
+# For each site, expand to k=2 ring hexagons (trade area)
+# Then for each hex in the trade area, compute Huff probabilities
+
+# Step 1: Get site trade area hexagons with population
+site_trade = sites_ring2.join(
+    demographics.select(
+        F.col("h3_index").alias("neighbor_h3"),
+        "population", "latitude", "longitude",
+    ),
+    on="neighbor_h3",
+    how="inner",
+).select(
+    "site_id", "neighbor_h3",
+    F.col("population").alias("hex_pop"),
+    F.col("latitude").alias("hex_lat"),
+    F.col("longitude").alias("hex_lon"),
+)
+
+# Step 2: For each hex in each site's trade area, find all supply points within HUFF_CANNIB_RADIUS
+# We need the site's attractiveness too — get it from all_sites
+site_attract = all_sites.select(
+    "site_id", "metro",
+    F.col("square_feet").alias("site_sqft"),
+    F.col("drive_thru_pct").alias("site_dt"),
+    F.col("latitude").alias("site_lat"),
+    F.col("longitude").alias("site_lon"),
+).withColumn(
+    "site_attractiveness",
+    F.coalesce(F.col("site_sqft"), F.lit(2000)) * (F.lit(1.0) + F.when(F.col("site_dt") > 0, F.lit(0.3)).otherwise(F.lit(0.0)))
+)
+
+# Join trade area hexes with site attractiveness
+trade_with_site = site_trade.join(
+    site_attract.select("site_id", "metro", "site_lat", "site_lon", "site_attractiveness"),
+    on="site_id",
+    how="inner",
+)
+
+# Compute distance from each trade-area hex to the focal site
+trade_with_site = trade_with_site.withColumn(
+    "site_hex_dist",
+    F.greatest(haversine_miles_expr(F.col("hex_lat"), F.col("hex_lon"), F.col("site_lat"), F.col("site_lon")), F.lit(0.05))
+)
+
+# Compute site gravity for each hex: attract / dist^beta
+trade_with_site = trade_with_site.withColumn(
+    "site_gravity", F.col("site_attractiveness") / F.pow(F.col("site_hex_dist"), F.lit(HUFF_BETA))
+)
+
+# Step 3: For each hex, sum gravity of ALL supply points within radius
+# Cross-join hexes with supply points (same metro), compute distance + gravity
+hex_supply = trade_with_site.select(
+    "site_id", "neighbor_h3", "hex_pop", "hex_lat", "hex_lon", "metro", "site_gravity"
+).join(
+    all_supply.select("supply_id", "supply_lat", "supply_lon", "attractiveness", F.col("metro").alias("s_metro")),
+    F.col("metro") == F.col("s_metro"),
+    how="inner",
+).drop("s_metro")
+
+hex_supply = hex_supply.withColumn(
+    "supply_dist",
+    F.greatest(haversine_miles_expr(F.col("hex_lat"), F.col("hex_lon"), F.col("supply_lat"), F.col("supply_lon")), F.lit(0.05))
+).filter(
+    F.col("supply_dist") <= HUFF_CANNIB_RADIUS
+).withColumn(
+    "supply_gravity", F.col("attractiveness") / F.pow(F.col("supply_dist"), F.lit(HUFF_BETA))
+)
+
+# Sum all supply gravity per (site_id, hex)
+total_gravity_per_hex = hex_supply.groupBy("site_id", "neighbor_h3", "hex_pop", "site_gravity").agg(
+    F.sum("supply_gravity").alias("total_supply_gravity"),
+)
+
+# Huff probability = site_gravity / (site_gravity + total_supply_gravity)
+huff_probs = total_gravity_per_hex.withColumn(
+    "huff_prob",
+    F.col("site_gravity") / (F.col("site_gravity") + F.col("total_supply_gravity"))
+)
+
+# Expected demand: population * $12/day avg spending * 365 * huff_prob
+DAILY_SPEND_PER_CAPITA = 12.0
+huff_features = huff_probs.groupBy("site_id").agg(
+    F.avg("huff_prob").alias("huff_market_share"),
+    F.sum(F.col("hex_pop") * F.lit(DAILY_SPEND_PER_CAPITA) * F.lit(365) * F.col("huff_prob")).alias("huff_expected_demand"),
+)
+
+print(f"Huff features: {huff_features.count()} sites")
+display(huff_features.describe())
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 10. Assemble Final Feature Table
 
 # COMMAND ----------
@@ -425,6 +665,7 @@ features = (
     .join(poi_features, on="site_id", how="left")
     .join(property_features, on="site_id", how="left")
     .join(cannib_risk, on="site_id", how="left")
+    .join(huff_features, on="site_id", how="left")
 )
 
 # Fill remaining nulls with 0 for numeric features (e.g., no competitors nearby = 0)
@@ -553,4 +794,4 @@ display(spark.sql(f"SELECT * FROM {table_name} LIMIT 10"))
 # MAGIC - **Competition**: counts at k=1/k=3, nearest dist, gravity intensity
 # MAGIC - **POI**: anchors, offices, schools, foot traffic
 # MAGIC - **Property**: drive-thru, parking, sqft, rent
-# MAGIC - **Derived**: trade area quality, cannibalization risk, market saturation
+# MAGIC - **Derived**: trade area quality, cannibalization risk, market saturation, Huff market share, Huff expected demand

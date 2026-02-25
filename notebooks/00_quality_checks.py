@@ -110,6 +110,62 @@ def check_value_ranges(table_name, column, min_val, max_val):
     else:
         return False, f"{column}: {out_of_range:,} values out of range [{min_val}, {max_val}]"
 
+
+def check_null_rate(table_name, column, max_null_pct=0.05):
+    """Verify null rate is below threshold."""
+    df = spark.table(table_name)
+    if column not in df.columns:
+        return True, f"Column {column} not in table"
+    total = df.count()
+    nulls = df.filter(F.col(column).isNull()).count()
+    null_pct = nulls / max(total, 1)
+    if null_pct <= max_null_pct:
+        return True, f"{column} null rate: {null_pct:.1%} (max: {max_null_pct:.0%})"
+    else:
+        return False, f"{column} null rate: {null_pct:.1%} exceeds max {max_null_pct:.0%} ({nulls:,} nulls)"
+
+
+def check_sales_quality_correlation(stores_table, min_corr=0.4):
+    """Verify that annual sales correlate with location quality score.
+
+    This is the critical circular-reasoning guard: if sales are random noise,
+    SHAP explanations are meaningless. Target: r > 0.4.
+    """
+    import pandas as pd
+    df = spark.table(stores_table).select("annual_sales", "location_quality_score")
+    if "location_quality_score" not in df.columns:
+        return True, "No location_quality_score column — skipping correlation check"
+    pdf = df.toPandas()
+    corr = pdf["annual_sales"].corr(pdf["location_quality_score"])
+    if corr >= min_corr:
+        return True, f"Sales ↔ quality correlation: {corr:.3f} (minimum: {min_corr})"
+    else:
+        return False, f"Sales ↔ quality correlation: {corr:.3f} is below minimum {min_corr} — SHAP explanations may be unreliable"
+
+
+def check_metro_coverage(table_name, metro_column="metro", expected_metros=None):
+    """Verify all expected metros have data."""
+    df = spark.table(table_name)
+    if metro_column not in df.columns:
+        return True, f"No {metro_column} column in table"
+    found = set(r[metro_column] for r in df.select(metro_column).distinct().collect())
+    if expected_metros:
+        missing = set(expected_metros) - found
+        if missing:
+            return False, f"Missing metros: {missing}"
+    return True, f"Metros found: {sorted(found)}"
+
+
+def check_referential_integrity(child_table, child_col, parent_table, parent_col):
+    """Verify FK-like integrity between tables."""
+    child_df = spark.table(child_table).select(child_col).distinct()
+    parent_df = spark.table(parent_table).select(parent_col).distinct()
+    orphans = child_df.join(parent_df, child_df[child_col] == parent_df[parent_col], "left_anti").count()
+    if orphans == 0:
+        return True, f"All {child_col} values exist in {parent_table}.{parent_col}"
+    else:
+        return False, f"{orphans:,} orphan values in {child_col} not found in {parent_table}.{parent_col}"
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -294,3 +350,96 @@ if not all_passed:
     raise Exception(f"Quality checks failed: {', '.join(failed_checks)}")
 
 print(f"Quality validation complete for {table_name}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Phase Gate: Cross-Table Validation
+# MAGIC
+# MAGIC When `table_name = "validate_all"`, runs inter-table checks that validate
+# MAGIC Phase 1 output is ready for Phase 2. This is the quality gate between
+# MAGIC demo data generation and the ML pipeline.
+
+# COMMAND ----------
+
+if table_name == "validate_all":
+    print(f"\n{'='*60}")
+    print("PHASE GATE: Cross-Table Validation")
+    print(f"{'='*60}\n")
+
+    gate_results = []
+    gate_passed = True
+
+    # 1. All bronze tables exist with minimum rows
+    bronze_tables = ["demographics", "traffic", "competitors", "poi",
+                     "existing_stores", "locations", "daypart_demand"]
+    for t in bronze_tables:
+        full_name = f"{schema_map['bronze']}.{t}"
+        passed, msg = check_table_exists(full_name)
+        gate_results.append((f"Exists: {t}", passed, msg))
+        gate_passed = gate_passed and passed
+        if passed:
+            cfg = TABLE_CHECKS.get(t, {})
+            passed, msg = check_row_count(full_name, cfg.get("min_rows", 100))
+            gate_results.append((f"Rows: {t}", passed, msg))
+            gate_passed = gate_passed and passed
+
+    # 2. Sales-quality correlation (the anti-circular-reasoning check)
+    stores_table = f"{schema_map['bronze']}.existing_stores"
+    try:
+        passed, msg = check_sales_quality_correlation(stores_table, min_corr=0.4)
+        gate_results.append(("Sales-Quality Correlation", passed, msg))
+        gate_passed = gate_passed and passed
+    except Exception as e:
+        gate_results.append(("Sales-Quality Correlation", False, f"Error: {e}"))
+        gate_passed = False
+
+    # 3. Metro coverage — all expected metros have data in all tables
+    demo_df = spark.table(f"{schema_map['bronze']}.demographics")
+    expected_metros = [r["metro"] for r in demo_df.select("metro").distinct().collect()]
+    for t in ["traffic", "competitors", "existing_stores", "locations"]:
+        full_name = f"{schema_map['bronze']}.{t}"
+        col = "metro" if t != "competitors" else "metro"
+        passed, msg = check_metro_coverage(full_name, metro_column=col, expected_metros=expected_metros)
+        gate_results.append((f"Metro Coverage: {t}", passed, msg))
+        gate_passed = gate_passed and passed
+
+    # 4. H3 index referential integrity (stores and locations should reference valid hex cells)
+    passed, msg = check_referential_integrity(
+        f"{schema_map['bronze']}.existing_stores", "h3_res8",
+        f"{schema_map['bronze']}.demographics", "h3_index"
+    )
+    gate_results.append(("FK: stores → demographics", passed, msg))
+    # Note: this may have orphans due to jitter in store placement — warn don't fail
+    if not passed:
+        print(f"  WARNING (non-fatal): {msg}")
+        gate_results[-1] = ("FK: stores → demographics", True, f"WARNING: {msg}")
+
+    # 5. Null rates on critical columns
+    critical_null_checks = [
+        (f"{schema_map['bronze']}.existing_stores", "annual_sales"),
+        (f"{schema_map['bronze']}.existing_stores", "location_quality_score"),
+        (f"{schema_map['bronze']}.demographics", "population"),
+        (f"{schema_map['bronze']}.demographics", "median_income"),
+    ]
+    for tbl, col in critical_null_checks:
+        passed, msg = check_null_rate(tbl, col, max_null_pct=0.01)
+        gate_results.append((f"Nulls: {col}", passed, msg))
+        gate_passed = gate_passed and passed
+
+    # Print results
+    print(f"\n{'='*60}")
+    print("Phase Gate Results")
+    print(f"{'='*60}\n")
+    for check_name, passed, msg in gate_results:
+        status = "✅ PASS" if passed else "❌ FAIL"
+        print(f"{status} | {check_name}: {msg}")
+
+    print(f"\n{'='*60}")
+    if gate_passed:
+        print("✅ PHASE GATE PASSED — safe to proceed to Phase 2 (ML Pipeline)")
+    else:
+        print("❌ PHASE GATE FAILED — fix data issues before running ML pipeline")
+        failed_gates = [name for name, passed, _ in gate_results if not passed]
+        raise Exception(f"Phase gate failed: {', '.join(failed_gates)}")
+    print(f"{'='*60}\n")

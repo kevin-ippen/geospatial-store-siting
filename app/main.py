@@ -32,6 +32,7 @@ MODEL_ENDPOINT = os.getenv("MODEL_ENDPOINT", "qsr-site-scoring")
 SQL_WAREHOUSE_ID = os.getenv("SQL_WAREHOUSE_ID", "")
 
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 
 # Populated from database at startup
 METROS: list[str] = []
@@ -44,7 +45,12 @@ SIMILARITY_FEATURES = [
     "competitor_count_1ring", "competitor_count_3ring", "nearest_competitor_dist",
     "competitive_intensity", "retail_anchor_count_1ring", "school_count_2ring",
     "trade_area_quality", "cannibalization_risk", "market_saturation",
+    "huff_market_share", "huff_expected_demand",
 ]
+
+# Huff model parameters (must match _config.py)
+HUFF_BETA = 2.0
+HUFF_CANNIB_RADIUS = 3.0
 
 # ---------------------------------------------------------------------------
 # Globals (initialised in lifespan)
@@ -169,10 +175,13 @@ async def get_scored_locations(
 # ---------------------------------------------------------------------------
 @app.get("/api/site/{site_id}")
 async def get_site_detail(site_id: str):
-    """Return full feature detail for a single site."""
+    """Return full feature detail for a single site, including Huff gravity metrics."""
     query = f"""
-        SELECT f.*, s.predicted_annual_sales, s.percentile_rank,
-               s.score_tier, s.shap_top5
+        SELECT f.*,
+               s.predicted_annual_sales, s.percentile_rank,
+               s.score_tier, s.shap_top5,
+               COALESCE(f.huff_market_share, 0) AS huff_market_share,
+               COALESCE(f.huff_expected_demand, 0) AS huff_expected_demand
         FROM {CATALOG}.{SCHEMA}.location_features f
         JOIN {CATALOG}.{SCHEMA}.scored_locations s ON f.site_id = s.site_id
         WHERE f.site_id = :site_id
@@ -405,25 +414,41 @@ async def get_heatmap(
 # ---------------------------------------------------------------------------
 @app.get("/api/cannibalization/{site_id}")
 async def get_cannibalization(site_id: str):
-    """Estimate sales cannibalization impact on nearby existing stores."""
-    # Get candidate location
+    """Estimate sales cannibalization using Huff gravity model.
+
+    For each nearby existing store, computes demand reallocation:
+    1. Gets all supply points (stores + competitors) in the overlap zone
+    2. Computes Huff attractiveness = sqft * (1 + drive_thru * 0.3)
+    3. Before new site: store captures share based on its gravity vs all others
+    4. After new site: gravity is redistributed, reducing existing store share
+    5. Impact = store_sales * (share_before - share_after) / share_before
+    """
+    # Get candidate location + its features
     site_query = f"""
-        SELECT latitude, longitude, metro
-        FROM {CATALOG}.{SCHEMA}.scored_locations
-        WHERE site_id = :site_id
+        SELECT s.latitude, s.longitude, s.metro,
+               f.square_feet AS site_sqft,
+               f.drive_thru_capable_flag AS site_dt,
+               COALESCE(f.huff_expected_demand, 0) AS huff_expected_demand
+        FROM {CATALOG}.{SCHEMA}.scored_locations s
+        JOIN {CATALOG}.{SCHEMA}.location_features f ON s.site_id = f.site_id
+        WHERE s.site_id = :site_id
     """
     site_rows = await asyncio.to_thread(_run_sql, site_query, {"site_id": site_id})
     if not site_rows:
         raise HTTPException(404, "Site not found")
 
     site = site_rows[0]
+    site_sqft = float(site.get("site_sqft") or 2000)
+    site_dt = float(site.get("site_dt") or 0)
+    new_site_attract = site_sqft * (1.0 + (0.3 if site_dt > 0 else 0.0))
 
-    # Find nearby existing stores (within ~3 miles using bounding box approximation)
-    delta_lat = 3.0 / 69.0  # ~3 miles in latitude degrees
-    delta_lon = 3.0 / (69.0 * math.cos(math.radians(site["latitude"])))
+    # Find nearby existing stores (within HUFF_CANNIB_RADIUS miles)
+    delta_lat = HUFF_CANNIB_RADIUS / 69.0
+    delta_lon = HUFF_CANNIB_RADIUS / (69.0 * math.cos(math.radians(site["latitude"])))
 
     store_query = f"""
-        SELECT store_id, store_name, latitude, longitude, annual_sales, format
+        SELECT store_id, store_name, latitude, longitude, annual_sales,
+               format, square_feet, drive_thru_pct
         FROM {CATALOG}.bronze.existing_stores
         WHERE metro = :metro
           AND latitude BETWEEN :lat_min AND :lat_max
@@ -438,36 +463,109 @@ async def get_cannibalization(site_id: str):
     }
     stores = await asyncio.to_thread(_run_sql, store_query, store_params)
 
-    # Calculate impact for each nearby store
+    # Also get competitors in the overlap zone for gravity denominator
+    comp_query = f"""
+        SELECT competitor_id, latitude, longitude, drive_thru
+        FROM {CATALOG}.bronze.competitors
+        WHERE metro = :metro
+          AND latitude BETWEEN :lat_min AND :lat_max
+          AND longitude BETWEEN :lon_min AND :lon_max
+    """
+    competitors_nearby = await asyncio.to_thread(_run_sql, comp_query, store_params)
+
+    def _haversine(lat1, lon1, lat2, lon2):
+        """Haversine distance in miles."""
+        return math.sqrt(
+            ((lat1 - lat2) * 69.0) ** 2
+            + ((lon1 - lon2) * 69.0 * math.cos(math.radians(lat1))) ** 2
+        )
+
+    def _gravity(attract, dist):
+        """Huff gravity = attractiveness / dist^beta."""
+        d = max(dist, 0.05)  # floor to avoid division by zero
+        return attract / (d ** HUFF_BETA)
+
+    # Build supply point list (existing stores + competitors, but NOT the new site)
+    supply_points = []
+    for s in stores:
+        sqft = float(s.get("square_feet") or 2000)
+        dt = float(s.get("drive_thru_pct") or 0)
+        supply_points.append({
+            "id": s["store_id"],
+            "lat": s["latitude"], "lon": s["longitude"],
+            "attract": sqft * (1.0 + (0.3 if dt > 0 else 0.0)),
+        })
+    for c in competitors_nearby:
+        supply_points.append({
+            "id": c["competitor_id"],
+            "lat": c["latitude"], "lon": c["longitude"],
+            "attract": 2200 * (1.0 + (0.3 if c.get("drive_thru") else 0.0)),
+        })
+
+    # For each existing store, estimate Huff share before/after the new site
     impacts = []
     total_impact = 0
     for store in stores:
-        dist_mi = math.sqrt(
-            ((store["latitude"] - site["latitude"]) * 69.0) ** 2
-            + ((store["longitude"] - site["longitude"]) * 69.0 * math.cos(math.radians(site["latitude"]))) ** 2
-        )
-        if dist_mi > 3.0:
+        dist_to_new = _haversine(store["latitude"], store["longitude"],
+                                  site["latitude"], site["longitude"])
+        if dist_to_new > HUFF_CANNIB_RADIUS:
             continue
-        impact_pct = max(0, 0.15 * (1 - dist_mi / 3.0))
+
+        store_sqft = float(store.get("square_feet") or 2000)
+        store_dt = float(store.get("drive_thru_pct") or 0)
+        store_attract = store_sqft * (1.0 + (0.3 if store_dt > 0 else 0.0))
+
+        # Compute gravity sums at the store's location (proxy for its trade area centroid)
+        total_gravity_before = 0.0
+        store_own_gravity = 0.0
+        for sp in supply_points:
+            d = _haversine(store["latitude"], store["longitude"], sp["lat"], sp["lon"])
+            if d <= HUFF_CANNIB_RADIUS:
+                g = _gravity(sp["attract"], d)
+                total_gravity_before += g
+                if sp["id"] == store["store_id"]:
+                    store_own_gravity = g
+
+        # After: add the new site's gravity
+        new_site_gravity = _gravity(new_site_attract,
+                                     _haversine(store["latitude"], store["longitude"],
+                                                site["latitude"], site["longitude"]))
+        total_gravity_after = total_gravity_before + new_site_gravity
+
+        # Huff share change
+        share_before = store_own_gravity / total_gravity_before if total_gravity_before > 0 else 0
+        share_after = store_own_gravity / total_gravity_after if total_gravity_after > 0 else 0
+
+        if share_before > 0:
+            impact_pct = (share_before - share_after) / share_before
+        else:
+            impact_pct = 0
+
         impacted_sales = store["annual_sales"] * impact_pct
         total_impact += impacted_sales
+
         impacts.append({
             "store_id": store["store_id"],
             "store_name": store["store_name"],
             "latitude": store["latitude"],
             "longitude": store["longitude"],
-            "distance_mi": round(dist_mi, 2),
+            "distance_mi": round(dist_to_new, 2),
             "current_sales": store["annual_sales"],
             "impact_pct": round(impact_pct * 100, 1),
             "impacted_sales": round(impacted_sales),
+            "huff_share_before": round(share_before * 100, 1),
+            "huff_share_after": round(share_after * 100, 1),
         })
 
     impacts.sort(key=lambda x: x["distance_mi"])
     return {
         "site_id": site_id,
+        "method": "huff_gravity",
+        "huff_beta": HUFF_BETA,
         "impacts": impacts,
         "total_impacted_sales": round(total_impact),
         "stores_affected": len(impacts),
+        "new_site_attractiveness": round(new_site_attract),
     }
 
 
@@ -680,12 +778,134 @@ async def get_daypart(site_id: str):
 
 
 # ---------------------------------------------------------------------------
-# API: Config (maps key)
+# API: Flag Site for Field Visit (write-back action)
+# ---------------------------------------------------------------------------
+@app.post("/api/flag-site")
+async def flag_site(request: Request):
+    """Flag a candidate site for field visit — writes to flagged_sites table.
+
+    This is the operational write-back that transforms the app from analytical
+    dashboard to decision tool. A real estate analyst can review the ML score,
+    SHAP explanation, and cannibalization analysis, then flag promising sites
+    for physical inspection.
+    """
+    body = await request.json()
+    site_id = body.get("site_id")
+    flagged_by = body.get("flagged_by", "analyst")
+    notes = body.get("notes", "")
+    priority = body.get("priority", "normal")
+
+    if not site_id:
+        raise HTTPException(400, "site_id is required")
+    if priority not in ("high", "normal", "low"):
+        raise HTTPException(400, "priority must be high, normal, or low")
+
+    # Ensure flagged_sites table exists
+    create_query = f"""
+        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.flagged_sites (
+            site_id STRING,
+            flagged_by STRING,
+            flagged_at TIMESTAMP,
+            priority STRING,
+            notes STRING,
+            visit_status STRING DEFAULT 'pending',
+            visit_date DATE,
+            visit_notes STRING
+        )
+    """
+    await asyncio.to_thread(_run_sql, create_query)
+
+    # Insert the flag
+    insert_query = f"""
+        INSERT INTO {CATALOG}.{SCHEMA}.flagged_sites
+        (site_id, flagged_by, flagged_at, priority, notes, visit_status)
+        VALUES (:site_id, :flagged_by, current_timestamp(), :priority, :notes, 'pending')
+    """
+    await asyncio.to_thread(_run_sql, insert_query, {
+        "site_id": site_id,
+        "flagged_by": flagged_by,
+        "priority": priority,
+        "notes": notes,
+    })
+
+    return {"status": "flagged", "site_id": site_id, "priority": priority}
+
+
+@app.get("/api/flagged-sites")
+async def get_flagged_sites():
+    """Return all flagged sites with their visit status."""
+    query = f"""
+        SELECT fs.site_id, fs.flagged_by, fs.flagged_at, fs.priority,
+               fs.notes, fs.visit_status, fs.visit_date, fs.visit_notes,
+               sl.predicted_annual_sales, sl.score_tier, sl.metro,
+               sl.latitude, sl.longitude
+        FROM {CATALOG}.{SCHEMA}.flagged_sites fs
+        LEFT JOIN {CATALOG}.{SCHEMA}.scored_locations sl ON fs.site_id = sl.site_id
+        ORDER BY fs.flagged_at DESC
+    """
+    rows = await asyncio.to_thread(_run_sql, query)
+    return {"flagged_sites": rows, "count": len(rows)}
+
+
+@app.post("/api/flag-site/{site_id}/update")
+async def update_flag(site_id: str, request: Request):
+    """Update a flagged site after field visit (complete the feedback loop)."""
+    body = await request.json()
+    visit_status = body.get("visit_status", "visited")
+    visit_notes = body.get("visit_notes", "")
+
+    query = f"""
+        UPDATE {CATALOG}.{SCHEMA}.flagged_sites
+        SET visit_status = :visit_status,
+            visit_date = current_date(),
+            visit_notes = :visit_notes
+        WHERE site_id = :site_id
+    """
+    await asyncio.to_thread(_run_sql, query, {
+        "site_id": site_id,
+        "visit_status": visit_status,
+        "visit_notes": visit_notes,
+    })
+
+    return {"status": "updated", "site_id": site_id, "visit_status": visit_status}
+
+
+# ---------------------------------------------------------------------------
+# API: Config
 # ---------------------------------------------------------------------------
 @app.get("/api/config/maps-key")
 async def get_maps_key():
     """Return Google Maps API key for frontend."""
     return {"key": GOOGLE_MAPS_API_KEY}
+
+
+@app.get("/api/config/app-info")
+async def get_app_info():
+    """Return app configuration including demo mode status.
+
+    When demo_mode is true, the frontend should display a prominent banner:
+    'DEMO DATA — NOT VALIDATED FOR PRODUCTION USE'
+
+    This ensures viewers don't mistake synthetic demo outputs for validated
+    site recommendations. The banner should be visible but not block interaction.
+    """
+    return {
+        "demo_mode": DEMO_MODE,
+        "catalog": CATALOG,
+        "metros": METROS,
+        "demo_banner": {
+            "show": DEMO_MODE,
+            "message": "DEMO DATA \u2014 NOT VALIDATED FOR PRODUCTION USE",
+            "detail": (
+                "This application is running on synthetic demo data. "
+                "Site scores, SHAP explanations, and cannibalization analysis "
+                "reflect generated patterns, not real market conditions. "
+                "To use with real data, set DEMO_MODE=false and provide "
+                "your own bronze-layer tables."
+            ),
+            "style": "warning",  # frontend: render as yellow/amber banner
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

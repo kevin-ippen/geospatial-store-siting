@@ -109,6 +109,65 @@ print(f"Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 3b. Cross-Validation Confidence Intervals
+# MAGIC
+# MAGIC Before hyperparameter tuning, run k-fold CV on a baseline model to report
+# MAGIC R² and MAPE with confidence intervals: `R² = 0.52 ± 0.08 (5-fold CV)`.
+# MAGIC This gives a realistic estimate of model quality variance.
+
+# COMMAND ----------
+
+from sklearn.model_selection import KFold
+
+print(f"Running {CV_FOLDS}-fold cross-validation for confidence intervals...")
+
+kf = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=42)
+cv_r2_scores = []
+cv_mape_scores = []
+cv_rmse_scores = []
+
+for fold_i, (train_idx, val_idx) in enumerate(kf.split(X)):
+    X_cv_train, X_cv_val = X.iloc[train_idx], X.iloc[val_idx]
+    y_cv_train, y_cv_val = y.iloc[train_idx], y.iloc[val_idx]
+
+    cv_model = xgb.XGBRegressor(
+        n_estimators=200, max_depth=5, learning_rate=0.1,
+        random_state=42, tree_method="hist", eval_metric="rmse",
+    )
+    cv_model.fit(X_cv_train, y_cv_train, eval_set=[(X_cv_val, y_cv_val)], verbose=False)
+
+    cv_pred = cv_model.predict(X_cv_val)
+    fold_r2 = r2_score(y_cv_val, cv_pred)
+    fold_mape = np.mean(np.abs((y_cv_val - cv_pred) / y_cv_val))
+    fold_rmse = np.sqrt(mean_squared_error(y_cv_val, cv_pred))
+
+    cv_r2_scores.append(fold_r2)
+    cv_mape_scores.append(fold_mape)
+    cv_rmse_scores.append(fold_rmse)
+    print(f"  Fold {fold_i+1}: R²={fold_r2:.4f}  MAPE={fold_mape:.2%}  RMSE=${fold_rmse:,.0f}")
+
+cv_r2_mean, cv_r2_std = np.mean(cv_r2_scores), np.std(cv_r2_scores)
+cv_mape_mean, cv_mape_std = np.mean(cv_mape_scores), np.std(cv_mape_scores)
+cv_rmse_mean, cv_rmse_std = np.mean(cv_rmse_scores), np.std(cv_rmse_scores)
+
+print(f"\n{'='*55}")
+print(f"Cross-Validation Summary ({CV_FOLDS}-fold)")
+print(f"{'='*55}")
+print(f"  R²:    {cv_r2_mean:.4f} ± {cv_r2_std:.4f}")
+print(f"  MAPE:  {cv_mape_mean:.2%} ± {cv_mape_std:.2%}")
+print(f"  RMSE:  ${cv_rmse_mean:,.0f} ± ${cv_rmse_std:,.0f}")
+print(f"{'='*55}")
+
+if cv_r2_std > 0.15:
+    print(f"\n⚠ High variance in R² across folds (±{cv_r2_std:.3f}) — model stability is low")
+elif cv_r2_mean >= MIN_R2:
+    print(f"\n✓ CV R² ({cv_r2_mean:.3f} ± {cv_r2_std:.3f}) passes quality gate ({MIN_R2})")
+else:
+    print(f"\n⚠ CV R² ({cv_r2_mean:.3f} ± {cv_r2_std:.3f}) below quality gate ({MIN_R2}) — acceptable for demo")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 4. Optuna Hyperparameter Search
 
 # COMMAND ----------
@@ -278,6 +337,15 @@ with mlflow.start_run(run_name="xgboost_site_scoring_v1") as run:
     mlflow.log_metric("test_r2", r2)
     mlflow.log_metric("test_mape", mape)
     mlflow.log_metric("best_val_rmse", study.best_value)
+
+    # Log cross-validation confidence intervals
+    mlflow.log_metric("cv_r2_mean", cv_r2_mean)
+    mlflow.log_metric("cv_r2_std", cv_r2_std)
+    mlflow.log_metric("cv_mape_mean", cv_mape_mean)
+    mlflow.log_metric("cv_mape_std", cv_mape_std)
+    mlflow.log_metric("cv_rmse_mean", cv_rmse_mean)
+    mlflow.log_metric("cv_rmse_std", cv_rmse_std)
+    mlflow.log_param("cv_folds", CV_FOLDS)
 
     # Log feature importance as text (if SHAP succeeded)
     if _shap_ok:

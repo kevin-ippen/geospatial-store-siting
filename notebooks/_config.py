@@ -53,6 +53,20 @@ ALL_METROS = {
     "Denver": {"bounds": (39.5, 40.0, -105.1, -104.7), "center": (39.75, -104.9)},
 }
 
+# Metro-specific income multipliers (reflects cost-of-living differences)
+METRO_INCOME_MULTIPLIER = {
+    "Chicago": 1.05,
+    "Dallas": 0.95,
+    "Phoenix": 0.90,
+    "Atlanta": 0.95,
+    "Denver": 1.15,
+}
+
+# Huff gravity model parameters
+HUFF_BETA = 2.0            # distance decay exponent (higher = more local)
+HUFF_BETA_RANGE = (1.0, 3.0, 0.25)  # (min, max, step) for calibration grid search
+HUFF_CANNIB_RADIUS = 3.0   # miles — max distance for cannibalization analysis
+
 # In demo mode, restrict to a single metro for faster generation
 if DEMO_MODE:
     METROS = {DEMO_METRO: ALL_METROS[DEMO_METRO]}
@@ -100,6 +114,7 @@ PROPERTY_FEATURES = [
 ]
 DERIVED_FEATURES = [
     "trade_area_quality", "cannibalization_risk", "market_saturation",
+    "huff_market_share", "huff_expected_demand",
 ]
 
 # All numeric features for model input
@@ -120,5 +135,6 @@ DAYPART_COLUMNS = [
 # Model quality gates (relaxed for synthetic demo data with ~350 training samples)
 MIN_R2 = 0.35
 MAX_MAPE = 0.30
+CV_FOLDS = 5  # k-fold cross-validation for confidence intervals on model quality
 
 print(f"Config loaded: CATALOG={CATALOG}, DEMO_MODE={DEMO_MODE}, METROS={list(METROS.keys())}")
