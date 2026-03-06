@@ -25,6 +25,12 @@ variables:
   dev_signals_source:
     description: "How to ingest dev signal data: synthetic (default, demo-safe) | volume (pre-placed CSVs) | download (fetch from Zillow Research + Census BPS)"
     default: "synthetic"
+  competitors_source:
+    description: "Where to source competitor locations: synthetic (default, demo-safe) | osm (OpenStreetMap Overpass API, free, no key required)"
+    default: "synthetic"
+  poi_source:
+    description: "Where to source POI data: synthetic (default, demo-safe) | osm (OpenStreetMap Overpass API, free, no key required)"
+    default: "synthetic"
   app_owner:
     description: "User or group email with CAN_MANAGE on the app"
 

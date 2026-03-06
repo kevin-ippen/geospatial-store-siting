@@ -1,0 +1,71 @@
+resources:
+  jobs:
+    phase1_osm_ingestion:
+      name: "[${bundle.target}] QSR Siting - OSM Real Data Ingestion"
+      description: >
+        Optional module: replaces synthetic bronze.competitors and/or bronze.poi
+        with real locations from the OpenStreetMap Overpass API (free, no key required).
+        Run AFTER phase1_demo_data (which creates the catalog/schemas and other tables).
+        Run BEFORE phase2_ml_pipeline so the ML model trains on real competitor/POI data.
+
+        Workflow:
+          1. phase1_demo_data  — creates schemas + all synthetic bronze tables
+          2. phase1_osm_ingestion (this job, competitors_source=osm, poi_source=osm)
+                                — overwrites bronze.competitors + bronze.poi with real OSM data
+          3. phase2_ml_pipeline — trains model on real data
+
+        Coverage: OSM covers 85-95% of major QSR brands in US metros.
+        Responses are cached in /Volumes/{catalog}/bronze/raw/osm_cache/ to avoid
+        re-fetching on re-runs.
+      tags:
+        project: "geospatial-siting"
+        phase: "1-osm"
+
+      tasks:
+        - task_key: ingest_osm_data
+          notebook_task:
+            notebook_path: ../notebooks/07_ingest_osm_competitors.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              competitors_source: ${var.competitors_source}
+              poi_source: ${var.poi_source}
+          environment_key: osm_env
+
+        - task_key: validate_osm_competitors
+          depends_on:
+            - task_key: ingest_osm_data
+          notebook_task:
+            notebook_path: ../notebooks/00_quality_checks.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              table_name: "competitors"
+              schema_name: "bronze"
+              min_rows: "50"
+          environment_key: osm_env
+
+        - task_key: validate_osm_poi
+          depends_on:
+            - task_key: ingest_osm_data
+          notebook_task:
+            notebook_path: ../notebooks/00_quality_checks.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              table_name: "poi"
+              schema_name: "bronze"
+              min_rows: "100"
+          environment_key: osm_env
+
+      environments:
+        - environment_key: osm_env
+          spec:
+            client: "1"
+            dependencies:
+              - h3>=3.7
+              - pandas>=2.0
+              - requests>=2.28
+
+      max_concurrent_runs: 1
+      timeout_seconds: 1800

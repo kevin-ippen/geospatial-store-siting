@@ -115,12 +115,16 @@ print(f"  Zip signals after Zillow join: {zip_signals.count()} zips")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Join Building Permits (County → Zip)
+# MAGIC ## 3. Join Building Permits (County → Zip via Census ZCTA-to-County Crosswalk)
 # MAGIC
-# MAGIC BPS data is county-level; we join via the county FIPS code embedded in the
-# MAGIC Census ZCTA-to-county relationship file. As a pragmatic shortcut, we join on
-# MAGIC `county_name` from the Zillow ZHVI table (which includes county names).
-# MAGIC A more precise join using the HUD USPS crosswalk can replace this if needed.
+# MAGIC BPS data is county-level (county_fips); Zillow data is zip-level.
+# MAGIC We join via the **Census ZCTA-to-County 2020 Relationship File** — a free public
+# MAGIC download that maps every 5-digit ZCTA (≈ zip code) to its dominant county FIPS.
+# MAGIC
+# MAGIC URL: https://www2.census.gov/geo/docs/maps-data/data/rel2020/zcta520/tab20_zcta520_county20_natl.txt
+# MAGIC
+# MAGIC Each ZCTA may span multiple counties; we take the county with the largest
+# MAGIC land-area overlap (`AREALANDPCT`) as the dominant county for that zip.
 
 # COMMAND ----------
 
@@ -128,40 +132,72 @@ bps = spark.table(f"{BRONZE}.building_permits_county").select(
     "county_fips", "permits_new_units_avg", "permits_yoy_pct"
 )
 
-# Build a county_name → county_fips mapping from the ZHVI table
-# (Zillow ZHVI includes county_name; BPS has county_fips)
-# For now, join BPS stats back to zip signals at a coarser level:
-# we aggregate permit YoY as an average across all zips in the same H3 cell.
-# If the customer has a FIPS crosswalk, replace this join with:
-#   zip_signals.join(county_fips_lookup, on="zip_code").join(bps, on="county_fips")
+# ── Step 1: Download Census ZCTA-to-County 2020 crosswalk ────────────────────
+ZCTA_COUNTY_URL = (
+    "https://www2.census.gov/geo/docs/maps-data/data/rel2020/zcta520/"
+    "tab20_zcta520_county20_natl.txt"
+)
+ZCTA_COUNTY_CACHE = f"/dbfs{DEV_SIGNALS_VOLUME}/zcta_county_crosswalk.csv"
 
-# Aggregate permit data to H3 using a uniform "nearby permits" proxy:
-# Re-aggregate BPS from wide county view → h3 by spatial proximity
-# For a clean real-data path: use HUD USPS quarterly crosswalk
-# (https://www.huduser.gov/portal/datasets/usps_crosswalk.html)
+if not os.path.exists(ZCTA_COUNTY_CACHE):
+    print("Downloading Census ZCTA-to-County 2020 relationship file (~11MB)...")
+    urllib.request.urlretrieve(ZCTA_COUNTY_URL, ZCTA_COUNTY_CACHE)
+    print(f"  Cached to {ZCTA_COUNTY_CACHE}")
+else:
+    print(f"  Loaded from cache: {ZCTA_COUNTY_CACHE}")
 
-# ── Simple approach: average BPS stats into each H3 cell via county name ─────
-h3_with_county = zip_signals.select("h3_res8", "county_name").distinct()
+zcta_county_pdf = pd.read_csv(
+    ZCTA_COUNTY_CACHE,
+    sep="|",
+    dtype={"ZCTA5CE20": str, "GEOID_COUNTY_20": str},
+    usecols=["ZCTA5CE20", "GEOID_COUNTY_20", "AREALANDPCT"],
+)
+zcta_county_pdf["zip_code"] = zcta_county_pdf["ZCTA5CE20"].str.zfill(5)
+zcta_county_pdf["county_fips"] = zcta_county_pdf["GEOID_COUNTY_20"].str.zfill(5)
+zcta_county_pdf["area_pct"] = pd.to_numeric(zcta_county_pdf["AREALANDPCT"], errors="coerce").fillna(0)
 
-# Map county_name to BPS FIPS -- limited accuracy, fine for scoring signals
-# (county_name from ZHVI is city or county string, not standardized FIPS)
-# We use a rough permit signal: derive from national average as fallback.
-bps_agg = bps.agg(
+# Keep dominant county per zip (max land-area overlap)
+dominant_county = (
+    zcta_county_pdf.sort_values("area_pct", ascending=False)
+    .drop_duplicates(subset=["zip_code"], keep="first")[["zip_code", "county_fips"]]
+)
+print(f"  ZCTA-to-County crosswalk: {len(dominant_county):,} zip codes mapped to county FIPS")
+
+# ── Step 2: Join zip → county_fips → BPS stats ───────────────────────────────
+zip_county = spark.createDataFrame(dominant_county)
+
+# Standardize county_fips format in BPS table
+bps_pandas = bps.toPandas()
+bps_pandas["county_fips"] = bps_pandas["county_fips"].astype(str).str.zfill(5)
+bps_spark = spark.createDataFrame(bps_pandas)
+
+# Compute national averages as fallback for unmatched zips
+bps_agg = bps_spark.agg(
     F.avg("permits_new_units_avg").alias("national_avg_permits"),
     F.avg("permits_yoy_pct").alias("national_avg_yoy"),
 ).collect()[0]
+national_avg_permits = int(bps_agg["national_avg_permits"] or 200)
+national_avg_yoy = float(bps_agg["national_avg_yoy"] or 0.03)
 
-# Join with zip_signals — for a real deployment replace with FIPS crosswalk
-zip_signals_w_permits = zip_signals.withColumn(
-    "permits_new_units_avg",
-    F.lit(int(bps_agg["national_avg_permits"] or 200)).cast("int"),
-).withColumn(
-    "permits_yoy_pct",
-    F.lit(float(bps_agg["national_avg_yoy"] or 0.03)).cast("double"),
+# Join: zip_signals → county FIPS → BPS; fall back to national avg for no-match zips
+zip_signals_w_permits = (
+    zip_signals
+    .join(F.broadcast(zip_county), on="zip_code", how="left")
+    .join(F.broadcast(bps_spark), on="county_fips", how="left")
+    .withColumn(
+        "permits_new_units_avg",
+        F.coalesce(F.col("permits_new_units_avg"), F.lit(national_avg_permits)).cast("int"),
+    )
+    .withColumn(
+        "permits_yoy_pct",
+        F.coalesce(F.col("permits_yoy_pct"), F.lit(national_avg_yoy)).cast("double"),
+    )
 )
 
-print("  Permit signals joined (county-level average; replace with FIPS crosswalk for precision)")
-print(f"  national_avg_permits={bps_agg['national_avg_permits']:.0f}, national_avg_yoy={bps_agg['national_avg_yoy']:.3f}")
+matched = zip_signals_w_permits.filter(F.col("county_fips").isNotNull()).count()
+total = zip_signals_w_permits.count()
+print(f"  Permit signals: {matched}/{total} zips matched to BPS county ({matched/total*100:.1f}%)")
+print(f"  National fallback: avg_permits={national_avg_permits}, avg_yoy={national_avg_yoy:.3f}")
 
 # ── Multifamily Pipeline (5+ unit buildings) ──────────────────────────────
 # If BPS data has unit-type breakdown, extract 5+ unit column.
