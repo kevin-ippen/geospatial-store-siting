@@ -1,0 +1,57 @@
+resources:
+  jobs:
+    phase3_dev_signals:
+      name: "[${bundle.target}] QSR Siting - Development Signals"
+      description: >
+        Optional modular pipeline that ingests real-estate development signals
+        (Zillow ZHVI, ZORI, Census BPS) and joins them to the H3 grid.
+        Run before Phase 2 when dev_signals_mode=true to enrich the ML feature set
+        with home value growth, rental trends, and permit momentum signals.
+      tags:
+        project: "geospatial-siting"
+        phase: "3"
+
+      tasks:
+        - task_key: ingest_dev_signals
+          notebook_task:
+            notebook_path: ../notebooks/05_ingest_dev_signals.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              dev_signals_source: ${var.dev_signals_source}
+          environment_key: dev_signals_env
+
+        - task_key: build_h3_layer
+          depends_on:
+            - task_key: ingest_dev_signals
+          notebook_task:
+            notebook_path: ../notebooks/06_build_dev_signal_layer.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              dev_signals_source: ${var.dev_signals_source}
+          environment_key: dev_signals_env
+
+        - task_key: check_dev_signals
+          depends_on:
+            - task_key: build_h3_layer
+          notebook_task:
+            notebook_path: ../notebooks/00_quality_checks.py
+            source: WORKSPACE
+            base_parameters:
+              catalog: ${var.catalog}
+              table_name: "dev_signals_by_h3"
+              schema_name: "bronze"
+              min_rows: "100"
+          environment_key: dev_signals_env
+
+      environments:
+        - environment_key: dev_signals_env
+          spec:
+            client: "1"
+            dependencies:
+              - h3>=3.7
+              - pandas>=2.0
+
+      max_concurrent_runs: 1
+      timeout_seconds: 3600

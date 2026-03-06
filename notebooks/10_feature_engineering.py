@@ -417,6 +417,7 @@ print(f"Cannibalization features: {cannib_risk.count()} sites")
 # COMMAND ----------
 
 import mlflow
+import numpy as np
 from pyspark.sql import Window as W
 
 # --- Huff β calibration: grid search over existing stores ---
@@ -428,6 +429,28 @@ _existing_for_cal = spark.table(f"{BRONZE}.existing_stores").select(
     F.col("latitude"), F.col("longitude"),
     F.col("square_feet"), F.col("drive_thru_pct"),
 ).toPandas()
+
+# Build all_supply here for calibration (also constructed in section 9c for Huff features)
+_supply_stores_cal = spark.table(f"{BRONZE}.existing_stores").select(
+    F.col("store_id").alias("supply_id"),
+    F.col("latitude").alias("supply_lat"),
+    F.col("longitude").alias("supply_lon"),
+    F.col("square_feet").alias("supply_sqft"),
+    F.col("drive_thru_pct").alias("supply_dt"),
+    F.col("metro"),
+)
+_supply_competitors_cal = competitors.select(
+    F.col("competitor_id").alias("supply_id"),
+    F.col("latitude").alias("supply_lat"),
+    F.col("longitude").alias("supply_lon"),
+    F.lit(2200).alias("supply_sqft"),
+    F.when(F.col("drive_thru"), 0.7).otherwise(0.0).alias("supply_dt"),
+    F.col("metro"),
+)
+all_supply = _supply_stores_cal.unionByName(_supply_competitors_cal).withColumn(
+    "attractiveness",
+    F.col("supply_sqft") * (F.lit(1.0) + F.when(F.col("supply_dt") > 0, F.lit(0.3)).otherwise(F.lit(0.0)))
+)
 
 # Pre-collect supply points and trade area data for calibration
 _supply_pdf = all_supply.select("supply_id", "supply_lat", "supply_lon", "attractiveness", "metro").toPandas()
@@ -498,8 +521,13 @@ for beta_val in beta_candidates:
         print(f"  β={beta_val:.2f}  MSE={mse:.2e}  corr={corr:.3f}")
 
 # Pick best β by highest correlation (more robust than MSE with synthetic data)
-best_beta_row = max(beta_results, key=lambda r: r["corr"])
-CALIBRATED_HUFF_BETA = best_beta_row["beta"]
+if not beta_results:
+    print("WARNING: No beta calibration results — insufficient store coverage. Using default HUFF_BETA.")
+    CALIBRATED_HUFF_BETA = HUFF_BETA
+    best_beta_row = {"beta": HUFF_BETA, "corr": float("nan"), "mse": float("nan")}
+else:
+    best_beta_row = max(beta_results, key=lambda r: r["corr"])
+    CALIBRATED_HUFF_BETA = best_beta_row["beta"]
 
 print(f"\nCalibrated Huff β = {CALIBRATED_HUFF_BETA} (corr={best_beta_row['corr']:.3f})")
 print(f"  Default was β = {HUFF_BETA}")
@@ -530,6 +558,8 @@ HUFF_BETA = CALIBRATED_HUFF_BETA
 # MAGIC
 # MAGIC **Outputs**: `huff_market_share` (average probability across trade area) and
 # MAGIC `huff_expected_demand` (annual demand captured from surrounding population).
+
+huff_features = None  # default — set below; assembly handles None gracefully
 
 # All supply points: existing stores + competitors (each has location, sqft, drive-thru)
 supply_stores = spark.table(f"{BRONZE}.existing_stores").select(
@@ -606,11 +636,11 @@ trade_with_site = trade_with_site.withColumn(
 )
 
 # Step 3: For each hex, sum gravity of ALL supply points within radius
-# Cross-join hexes with supply points (same metro), compute distance + gravity
+# Broadcast all_supply (~376 rows) to avoid shuffle on the metro join
 hex_supply = trade_with_site.select(
     "site_id", "neighbor_h3", "hex_pop", "hex_lat", "hex_lon", "metro", "site_gravity"
 ).join(
-    all_supply.select("supply_id", "supply_lat", "supply_lon", "attractiveness", F.col("metro").alias("s_metro")),
+    F.broadcast(all_supply.select("supply_id", "supply_lat", "supply_lon", "attractiveness", F.col("metro").alias("s_metro"))),
     F.col("metro") == F.col("s_metro"),
     how="inner",
 ).drop("s_metro")
@@ -637,13 +667,81 @@ huff_probs = total_gravity_per_hex.withColumn(
 
 # Expected demand: population * $12/day avg spending * 365 * huff_prob
 DAILY_SPEND_PER_CAPITA = 12.0
-huff_features = huff_probs.groupBy("site_id").agg(
-    F.avg("huff_prob").alias("huff_market_share"),
-    F.sum(F.col("hex_pop") * F.lit(DAILY_SPEND_PER_CAPITA) * F.lit(365) * F.col("huff_prob")).alias("huff_expected_demand"),
-)
+try:
+    huff_features = huff_probs.groupBy("site_id").agg(
+        F.avg("huff_prob").alias("huff_market_share"),
+        F.sum(F.col("hex_pop") * F.lit(DAILY_SPEND_PER_CAPITA) * F.lit(365) * F.col("huff_prob")).alias("huff_expected_demand"),
+    )
+    print(f"Huff features: {huff_features.count()} sites")
+    display(huff_features.describe())
+except Exception as _huff_err:
+    print(f"WARNING: Huff computation failed ({_huff_err}). huff_market_share and huff_expected_demand will be 0.")
+    huff_features = None
 
-print(f"Huff features: {huff_features.count()} sites")
-display(huff_features.describe())
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9d. Development Signal Features (optional — Phase 3 module)
+# MAGIC
+# MAGIC Joins `bronze.dev_signals_by_h3` when `dev_signals_mode=true`.
+# MAGIC Skipped silently when Phase 3 has not been run.
+# MAGIC
+# MAGIC **Signals added** (k=1 ring averages):
+# MAGIC
+# MAGIC | Feature | Source | Signal |
+# MAGIC |---------|--------|--------|
+# MAGIC | `avg_home_value_1ring` | Zillow ZHVI | Area wealth / lease cost surrogate |
+# MAGIC | `avg_home_value_growth_1yr_1ring` | Zillow ZHVI | Growing market signal |
+# MAGIC | `avg_rent_index_1ring` | Zillow ZORI | Median monthly rent |
+# MAGIC | `avg_rent_growth_1yr_1ring` | Zillow ZORI | Demand pressure indicator |
+# MAGIC | `avg_permit_momentum_1ring` | Census BPS | Residential supply pipeline YoY |
+# MAGIC | `avg_multifamily_pipeline_1ring` | Census BPS 5+ units / Dodge | Population growth signal |
+# MAGIC | `avg_commercial_starts_1ring` | Dodge / ConstructConnect proxy | Anchor node formation |
+# MAGIC | `avg_infra_investment_1ring` | USAspending.gov / FHWA proxy | Access uplift signal |
+
+# COMMAND ----------
+
+if DEV_SIGNALS_ENABLED:
+    dev_signals = spark.table(f"{BRONZE}.dev_signals_by_h3")
+    _dev_cols = [
+        F.col("h3_res8").alias("neighbor_h3"),
+        "home_value_index",
+        "home_value_growth_1yr",
+        "rent_index",
+        "rent_growth_1yr",
+        "permits_yoy_pct",
+    ]
+    # New signals added in Phase 3 v2 — include if present (backwards compatible)
+    for _col in ["multifamily_units_pipeline", "commercial_starts_index", "infra_investment_score"]:
+        if _col in dev_signals.columns:
+            _dev_cols.append(_col)
+
+    dev_joined = sites_ring1.join(
+        dev_signals.select(*_dev_cols),
+        on="neighbor_h3",
+        how="left",
+    )
+    _agg_exprs = [
+        F.avg("home_value_index").alias("avg_home_value_1ring"),
+        F.avg("home_value_growth_1yr").alias("avg_home_value_growth_1yr_1ring"),
+        F.avg("rent_index").alias("avg_rent_index_1ring"),
+        F.avg("rent_growth_1yr").alias("avg_rent_growth_1yr_1ring"),
+        F.avg("permits_yoy_pct").alias("avg_permit_momentum_1ring"),
+    ]
+    if "multifamily_units_pipeline" in dev_signals.columns:
+        _agg_exprs.append(F.avg("multifamily_units_pipeline").alias("avg_multifamily_pipeline_1ring"))
+    if "commercial_starts_index" in dev_signals.columns:
+        _agg_exprs.append(F.avg("commercial_starts_index").alias("avg_commercial_starts_1ring"))
+    if "infra_investment_score" in dev_signals.columns:
+        _agg_exprs.append(F.avg("infra_investment_score").alias("avg_infra_investment_1ring"))
+
+    dev_features = dev_joined.groupBy("site_id").agg(*_agg_exprs)
+    print(f"Development signal features: {dev_features.count()} sites, {len(dev_features.columns)-1} signals")
+    display(dev_features.limit(5))
+else:
+    dev_features = None
+    print("DEV_SIGNALS_ENABLED=false — skipping development signal features")
+    print("  Run phase3_dev_signals job, then re-run with dev_signals_mode=true to include")
 
 # COMMAND ----------
 
@@ -651,6 +749,11 @@ display(huff_features.describe())
 # MAGIC ## 10. Assemble Final Feature Table
 
 # COMMAND ----------
+
+# Safety: huff_features may be undefined if section 9c crashed (OOM causes session reset)
+if 'huff_features' not in dir():
+    huff_features = None
+    print("WARNING: huff_features not defined (section 9c likely crashed) — Huff features will be 0")
 
 # Start with all_sites base
 base = all_sites.select("site_id", "h3_res8", "metro", "latitude", "longitude", "site_type")
@@ -665,8 +768,19 @@ features = (
     .join(poi_features, on="site_id", how="left")
     .join(property_features, on="site_id", how="left")
     .join(cannib_risk, on="site_id", how="left")
-    .join(huff_features, on="site_id", how="left")
 )
+
+# Conditionally join Huff features (may be None if Huff computation failed)
+if huff_features is not None:
+    features = features.join(huff_features, on="site_id", how="left")
+else:
+    # Huff columns are in NUMERIC_FEATURES but were never computed — add as zeros
+    features = features.withColumn("huff_market_share", F.lit(0.0)) \
+                       .withColumn("huff_expected_demand", F.lit(0.0))
+
+# Conditionally join development signals (Phase 3 module)
+if dev_features is not None:
+    features = features.join(dev_features, on="site_id", how="left")
 
 # Fill remaining nulls with 0 for numeric features (e.g., no competitors nearby = 0)
 for col_name in NUMERIC_FEATURES:

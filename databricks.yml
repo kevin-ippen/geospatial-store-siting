@@ -19,6 +19,12 @@ variables:
   google_maps_api_key:
     description: "Google Maps API key for Street View (optional, leave empty to disable)"
     default: ""
+  dev_signals_mode:
+    description: "Include development signals in ML features (true/false). Requires phase3_dev_signals to have run first."
+    default: "false"
+  dev_signals_source:
+    description: "How to ingest dev signal data: synthetic (default, demo-safe) | volume (pre-placed CSVs) | download (fetch from Zillow Research + Census BPS)"
+    default: "synthetic"
   app_owner:
     description: "User or group email with CAN_MANAGE on the app"
 

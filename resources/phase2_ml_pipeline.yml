@@ -24,6 +24,7 @@ resources:
             source: WORKSPACE
             base_parameters:
               catalog: ${var.catalog}
+              dev_signals_mode: ${var.dev_signals_mode}
           environment_key: ml_env
 
         - task_key: check_features

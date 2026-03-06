@@ -8,12 +8,12 @@ command:
 
 env:
   - name: CATALOG
-    value: "${var.catalog}"
+    value: "serverless_stable_h7wanf_catalog"
   - name: SCHEMA
     value: gold
   - name: MODEL_ENDPOINT
-    value: "${var.model_endpoint_name}"
+    value: "qsr-site-scoring"
   - name: SQL_WAREHOUSE_ID
-    value: "${var.warehouse_id}"
+    value: "4047b28d66a51bdc"
   - name: GOOGLE_MAPS_API_KEY
-    value: "${var.google_maps_api_key}"
+    value: ""

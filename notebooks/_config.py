@@ -117,11 +117,32 @@ DERIVED_FEATURES = [
     "huff_market_share", "huff_expected_demand",
 ]
 
-# All numeric features for model input
+# All numeric features for model input (core — always included)
 NUMERIC_FEATURES = (
     DEMOGRAPHIC_FEATURES + TRAFFIC_FEATURES + COMPETITION_FEATURES +
     POI_FEATURES + PROPERTY_FEATURES + DERIVED_FEATURES
 )
+
+# --- Phase 3: Development Signals (optional module) ---
+# Enable by passing dev_signals_mode=true as a job parameter.
+# Requires Phase 3 (phase3_dev_signals job) to have run first to populate
+# bronze.dev_signals_by_h3 via notebooks 05_ingest_dev_signals + 06_build_dev_signal_layer.
+
+DEV_SIGNALS_ENABLED = _widget("dev_signals_mode", "false") == "true"
+
+DEV_SIGNAL_FEATURES = [
+    "avg_home_value_1ring",            # Zillow ZHVI — surrogate for area wealth & lease cost
+    "avg_home_value_growth_1yr_1ring", # YoY appreciation — growing market signal
+    "avg_rent_index_1ring",            # Zillow ZORI median monthly rent
+    "avg_rent_growth_1yr_1ring",       # YoY rent growth — demand pressure indicator
+    "avg_permit_momentum_1ring",       # Census BPS YoY change — residential supply pipeline
+    "avg_multifamily_pipeline_1ring",  # 5+ unit building pipeline — population growth signal
+    "avg_commercial_starts_1ring",     # Commercial construction index — anchor node formation
+    "avg_infra_investment_1ring",      # Infrastructure investment score — access uplift
+]
+
+if DEV_SIGNALS_ENABLED:
+    NUMERIC_FEATURES = NUMERIC_FEATURES + DEV_SIGNAL_FEATURES
 
 # Categorical features (will be one-hot encoded)
 CATEGORICAL_FEATURES = ["property_type", "metro"]
